@@ -1,0 +1,1 @@
+{"version":3,"file":"act.d.ts","sourceRoot":"","sources":["../../src/core/act.ts"],"names":[],"mappings":"AAAA,OAAO,KAAK,EAAE,KAAK,EAAE,UAAU,EAAE,SAAS,EAA0B,MAAM,mBAAmB,CAAA;AAa7F;;;;;;;;;;;;;;;;;;;;;;;GAuBG;AACH,wBAAsB,GAAG,CAAC,CAAC,EACzB,GAAG,EAAE,MAAM,EACX,EAAE,EAAE,KAAK,CAAC,CAAC,CAAC,EACZ,OAAO,GAAE,UAAe,GACvB,OAAO,CAAC,SAAS,CAAC,CAAC,CAAC,CAAC,CAwCvB"}
