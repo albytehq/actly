@@ -3,10 +3,12 @@ import { retryPolicy } from '../policies/retry.js';
 import { timeoutPolicy, totalTimeoutPolicy } from '../policies/timeout.js';
 import { dedupePolicy } from '../policies/dedupe.js';
 import { cachePolicy } from '../policies/cache.js';
-import { InMemoryStore } from '../state/store.js';
+import { InMemoryStore } from '../stores/memory.js';
 // Module-level default store so cache and dedupe persist across calls.
+// Always an InMemoryStore (SyncStateStore) — required because the default
+// chain may include dedupePolicy, which mandates synchronous store access.
 // For SSR isolation or per-test control, construct an InMemoryStore and
-// call execute() directly — it accepts any StateStore implementation.
+// call execute() directly with an explicit store.
 const defaultStore = new InMemoryStore();
 /**
  * Execute fn with the given reliability policies.

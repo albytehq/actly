@@ -1,4 +1,5 @@
-import type { ActFn, PolicyApplier, StateStore, RunMeta } from '../types/index.js';
+import type { ActFn, PolicyApplier, AnyStateStore, RunMeta } from '../types/index.js';
+export declare const REQUIRES_SYNC_STORE: unique symbol;
 export interface ExecutorInput<T> {
     key: string;
     fn: ActFn<T>;
@@ -6,14 +7,15 @@ export interface ExecutorInput<T> {
      * Policies ordered outermost -> innermost.
      * policies[0] intercepts first; policies[last] is closest to fn.
      *
-     * Canonical order: [cache, dedupe, retry, timeout]
-     *   cache   -> a hit skips everything below it
-     *   dedupe  -> collapses concurrent callers before retry fires
-     *   retry   -> owns the attempt loop
-     *   timeout -> each individual attempt races against the clock
+     * Canonical order: [totalTimeout, cache, dedupe, retry, timeout]
+     *   totalTimeout -> hard wall-clock budget over the entire operation
+     *   cache        -> a hit skips everything below it
+     *   dedupe       -> collapses concurrent callers before retry fires
+     *   retry        -> owns the attempt loop
+     *   timeout      -> each individual attempt races against the clock
      */
     policies: ReadonlyArray<PolicyApplier<T>>;
-    store: StateStore;
+    store: AnyStateStore;
     meta: RunMeta;
 }
 /**

@@ -161,6 +161,8 @@ const result = await act('config:load', () => loadRemoteConfig(), {
 
 `dedupe: { enabled: true }` is also valid — object form for forward compatibility.
 
+> **Note:** Deduped callers (those that joined an in-flight Promise) always receive `attempts: 1` in their result, because the retry counter belongs to the originating call. This is a known trade-off.
+
 ---
 
 ### Cache
@@ -236,6 +238,11 @@ import type {
   ActResult, ActSuccess, ActFailure, ActSource,
   ActOptions, ActFn,
   RetryOptions, TimeoutOptions, DedupeOptions, CacheOptions,
+  // v1.1 — store interfaces
+  SyncStateStore,
+  AsyncStateStore,
+  InMemoryStoreOptions,
+  // v1.0 alias — still valid, zero migration needed
   StateStore,
 } from 'actly'
 ```
@@ -249,19 +256,69 @@ By default `act` uses a module-level `InMemoryStore`. For SSR request isolation 
 ```ts
 import { InMemoryStore } from 'actly'
 
+// Basic
 const store = new InMemoryStore()
+
+// With background cleanup (useful for long-lived server-side stores)
+const store = new InMemoryStore({
+  autoCleanup: true,
+  cleanupIntervalMs: 60_000, // sweep every 60s (default: 30s)
+})
+
+// Always call destroy() when done to prevent timer leaks
+store.destroy()
 ```
 
-`InMemoryStore` satisfies the `StateStore` interface. Swap in any compatible key-value implementation.
+`InMemoryStore` satisfies `SyncStateStore`. Use it with `execute()` directly for full control.
+
+### Async store (v1.1+)
+
+For external cache backends (Redis, Upstash, etc.), implement `AsyncStateStore`:
 
 ```ts
-interface StateStore {
+import type { AsyncStateStore } from 'actly'
+
+class RedisStore implements AsyncStateStore {
+  readonly _sync = false as const
+
+  async get<T>(key: string): Promise<T | undefined> { /* ... */ }
+  async set<T>(key: string, value: T, ttlMs?: number): Promise<void> { /* ... */ }
+  async delete(key: string): Promise<void> { /* ... */ }
+  async has(key: string): Promise<boolean> { /* ... */ }
+  async clear(): Promise<void> { /* ... */ }
+  async size(): Promise<number> { /* ... */ }
+}
+```
+
+> `AsyncStateStore` is compatible with `cache` only. Using it with `dedupe` is a TypeScript error and a runtime error — dedupe requires synchronous store access. See `SyncStateStore` docs for the reason.
+
+---
+
+## Store interfaces
+
+```ts
+interface SyncStateStore {
+  readonly _sync: true
   get<T>(key: string): T | undefined
   set<T>(key: string, value: T, ttlMs?: number): void
   delete(key: string): void
   has(key: string): boolean
+  clear(): void
+  size(): number
+}
+
+interface AsyncStateStore {
+  readonly _sync: false
+  get<T>(key: string): Promise<T | undefined>
+  set<T>(key: string, value: T, ttlMs?: number): Promise<void>
+  delete(key: string): Promise<void>
+  has(key: string): Promise<boolean>
+  clear(): Promise<void>
+  size(): Promise<number>
 }
 ```
+
+The `_sync` discriminant is read at runtime by the executor to enforce the dedupe constraint. Set it as a `readonly` literal — `true as const` or `false as const`.
 
 ---
 
@@ -278,6 +335,43 @@ One function. One return type. No exceptions in userland.
 The key is your responsibility. Make it stable and specific. `user:42` is good. `fetch` is not.
 
 Policies are composable but intentionally constrained. There is no builder API, no middleware system, no hooks. If you need something `act` doesn't do, write a wrapper around it — that's the right boundary.
+
+---
+
+## Changelog
+
+### v1.1.0 — 2026-06-01
+
+**New features**
+
+- **`AsyncStateStore` interface** — plug in any async key-value backend (Redis, Upstash, Cloudflare KV). Compatible with `cache` policy. Using with `dedupe` is a compile-time and runtime error by design.
+- **`SyncStateStore` interface** — the canonical public name for what was previously the internal store shape. `StateStore` is preserved as an alias with zero breakage for existing code.
+- **`InMemoryStore` is now a public export** — construct isolated stores for SSR request isolation, per-test control, or multi-tenant scenarios. Accepts `InMemoryStoreOptions`.
+- **`InMemoryStoreOptions`** — opt-in `autoCleanup` with configurable `cleanupIntervalMs`. Call `destroy()` to stop the background timer and prevent leaks.
+- **`TotalTimeoutError`** — new error class thrown when `totalTimeout` fires. Distinct from `TimeoutError` (per-attempt) so `instanceof` tells you which deadline fired.
+- **`totalTimeout` option** — hard wall-clock budget over the entire operation including all retry attempts and delays. Use alongside `timeout` to express both per-attempt and total constraints.
+- **`dedupe: true` shorthand** — equivalent to `dedupe: { enabled: true }`. Object form still valid for forward compatibility.
+- **`isSyncStore()` / `isAsyncStore()` type guards** — exported from `actly` for consumers building custom policy chains or store adapters.
+
+**Internal improvements**
+
+- Executor validates sync-store requirement at chain-build time — async store + `dedupePolicy` throws immediately with a clear message instead of producing silent correctness failures.
+- `dedupePolicy` tagged with `REQUIRES_SYNC_STORE` symbol — allows executor to detect the constraint without importing the policy module (avoids circular deps).
+- `cachePolicy` now branches sync/async paths — fast synchronous path for `InMemoryStore`, async-await path for external stores.
+
+**Non-breaking changes**
+
+- `StateStore` preserved as type alias for `SyncStateStore` — all v1.0 code compiles without changes.
+- All new exports are purely additive.
+
+---
+
+### v1.0.1
+
+- Initial stable release.
+- `act()`, `retry`, `timeout`, `totalTimeout`, `dedupe`, `cache`.
+- `TimeoutError` exported for `instanceof` checks.
+- Zero dependencies. ESM + CJS. Node 18+.
 
 ---
 

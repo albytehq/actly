@@ -112,7 +112,7 @@ export interface RunMeta {
 /** Everything a policy receives about the current run */
 export interface PolicyContext {
   key:   string
-  store: StateStore
+  store: AnyStateStore
   meta:  RunMeta
 }
 
@@ -127,10 +127,27 @@ export type PolicyApplier<T> = (fn: ActFn<T>, ctx: PolicyContext) => ActFn<T>
 
 // ─── State store ─────────────────────────────────────────────────────────────
 
-/** Minimal key-value contract used by dedupe and cache policies */
-export interface StateStore {
-  get<T>(key: string): T | undefined
-  set<T>(key: string, value: T, ttlMs?: number): void
-  delete(key: string): void
-  has(key: string): boolean
-}
+// Canonical interface definitions live in stores/base. Imported here so this
+// file can reference them locally (AnyStateStore alias, PolicyContext), and
+// re-exported so consumers only need one import from 'actly' or types/index.
+import type { SyncStateStore, AsyncStateStore } from '../stores/base.js'
+export type { SyncStateStore, AsyncStateStore }
+
+/**
+ * Public store type. v1.1: alias for SyncStateStore to preserve the
+ * existing contract — every v1.0 consumer typed against StateStore
+ * continues to compile without changes.
+ *
+ * A future major version may widen this to SyncStateStore | AsyncStateStore
+ * once call sites have been audited. For now: additive, non-breaking.
+ */
+export type StateStore = SyncStateStore
+
+/**
+ * Accepted by policies that support both sync and async stores (e.g. cache).
+ * Not part of the public surface yet — internal use only until the
+ * async-store path is fully documented and example adapters ship.
+ *
+ * @internal
+ */
+export type AnyStateStore = SyncStateStore | AsyncStateStore

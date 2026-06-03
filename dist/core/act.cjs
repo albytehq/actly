@@ -6,11 +6,13 @@ const retry_js_1 = require("../policies/retry.js");
 const timeout_js_1 = require("../policies/timeout.js");
 const dedupe_js_1 = require("../policies/dedupe.js");
 const cache_js_1 = require("../policies/cache.js");
-const store_js_1 = require("../state/store.js");
+const memory_js_1 = require("../stores/memory.js");
 // Module-level default store so cache and dedupe persist across calls.
+// Always an InMemoryStore (SyncStateStore) — required because the default
+// chain may include dedupePolicy, which mandates synchronous store access.
 // For SSR isolation or per-test control, construct an InMemoryStore and
-// call execute() directly — it accepts any StateStore implementation.
-const defaultStore = new store_js_1.InMemoryStore();
+// call execute() directly with an explicit store.
+const defaultStore = new memory_js_1.InMemoryStore();
 /**
  * Execute fn with the given reliability policies.
  *

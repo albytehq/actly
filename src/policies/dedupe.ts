@@ -1,7 +1,14 @@
 import type { ActFn, PolicyApplier, PolicyContext } from '../types/index.js'
+import type { SyncStateStore } from '../stores/base.js'
+import { REQUIRES_SYNC_STORE } from '../core/executor.js'
 
 // Namespace so dedupe keys never collide with cache keys in the shared store
 const NS = 'dedupe:'
+
+// PolicyContext uses AnyStateStore, but dedupe requires synchronous access.
+// We narrow via intersection here rather than changing the shared context type,
+// so the executor can pass the same ctx object to all policies.
+type DedupeContext = Omit<PolicyContext, 'store'> & { store: SyncStateStore }
 
 /**
  * Collapses concurrent calls that share the same key into one in-flight Promise.
@@ -9,20 +16,37 @@ const NS = 'dedupe:'
  * The first caller starts the work. Every subsequent caller that arrives before
  * the first resolves gets the same Promise back — no duplicate work.
  *
+ * INVARIANT: requires a SyncStateStore — see stores/base.ts.
+ * The read-then-write that makes deduplication work must happen in a single
+ * synchronous frame. An async store would introduce an await between get() and
+ * set(), letting two concurrent callers both see a miss and both launch work.
+ * The REQUIRES_SYNC_STORE symbol on the returned PolicyApplier lets execute()
+ * enforce this at runtime for JS callers that bypass TypeScript.
+ *
  * Known tradeoff (v1): deduped callers see attempts=1 in their ActResult because
  * the retry counter belongs to the originating call's meta object.
  */
 export function dedupePolicy<T>(): PolicyApplier<T> {
-  return (fn: ActFn<T>, ctx: PolicyContext): ActFn<T> =>
-    async () => {
-      const key = NS + ctx.key
+  const applier = (fn: ActFn<T>, ctx: PolicyContext): ActFn<T> => {
+    // Cast is safe: execute() verifies isSyncStore(ctx.store) before calling
+    // any policy tagged with REQUIRES_SYNC_STORE.
+    const syncCtx = ctx as DedupeContext
 
-      const inflight = ctx.store.get<Promise<T>>(key)
+    return async () => {
+      const key = NS + syncCtx.key
+
+      const inflight = syncCtx.store.get<Promise<T>>(key)
       if (inflight) return inflight
 
       // No TTL — .finally() cleans up regardless of outcome
-      const promise = fn().finally(() => ctx.store.delete(key))
-      ctx.store.set<Promise<T>>(key, promise)
+      const promise = fn().finally(() => syncCtx.store.delete(key))
+      syncCtx.store.set<Promise<T>>(key, promise)
       return promise
     }
+  }
+
+  // Tag so execute() can detect this policy without importing it
+  ;(applier as typeof applier & { [REQUIRES_SYNC_STORE]: boolean })[REQUIRES_SYNC_STORE] = true
+
+  return applier
 }
