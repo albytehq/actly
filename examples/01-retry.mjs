@@ -1,8 +1,10 @@
 /**
- * Example 1 — Retry
+ * Example 1 — Retry with cooperative cancellation
  *
  * Simulates a flaky upstream endpoint that fails the first two attempts
- * before succeeding. Shows retry recovery, attempt counting, and backoff.
+ * before succeeding. Shows retry recovery, attempt counting, backoff
+ * with jitter, and how `fn` receives an AbortSignal for cooperative
+ * cancellation.
  */
 
 import { act } from '../dist/index.js'
@@ -14,13 +16,18 @@ let callCount = 0
 /**
  * Pretends to be a remote API.
  * Fails with a 503 twice, then returns data on the third try.
+ *
+ * Note the `signal` parameter — in real code you'd pass it to `fetch`:
+ *   fetch(url, { signal })
  */
-async function fetchWeather(city) {
+async function fetchWeather(city, signal) {
   callCount++
   const attempt = callCount
 
-  // Simulate ~40ms network latency every time
+  // Simulate ~40ms network latency every time. In real code, fetch() would
+  // respect the signal and abort mid-flight; here we just check it after.
   await sleep(40)
+  if (signal.aborted) throw signal.reason
 
   if (attempt < 3) {
     console.log(`  [network] attempt ${attempt} → 503 Service Unavailable`)
@@ -36,11 +43,13 @@ async function fetchWeather(city) {
 console.log('=== Retry Demo ===\n')
 console.log('Fetching weather for "London" — endpoint fails twice before succeeding.\n')
 
-const result = await act('weather:london', () => fetchWeather('London'), {
+const result = await act('weather:london', (signal) => fetchWeather('London', signal), {
   retry: {
     attempts: 3,
     delayMs: 50,
     backoff: 'exponential', // 50ms, 100ms — fast enough for a demo
+    jitter: 'full',         // randomised to [0, delay] — default
+    maxDelay: 1000,         // cap (irrelevant here, but shown for completeness)
   },
 })
 
@@ -61,11 +70,12 @@ if (result.ok) {
 
 console.log('\n--- Now: endpoint never recovers ---\n')
 
-const alwaysFails = await act('weather:mars', async () => {
+const alwaysFails = await act('weather:mars', async (signal) => {
   await sleep(10)
+  if (signal.aborted) throw signal.reason
   throw new Error('ECONNREFUSED')
 }, {
-  retry: { attempts: 3, delayMs: 20 },
+  retry: { attempts: 3, delayMs: 20, jitter: 'none' },
 })
 
 if (!alwaysFails.ok) {

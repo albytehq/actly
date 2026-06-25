@@ -5,17 +5,37 @@ function isUnrefable(t) {
     return typeof t.unref === 'function';
 }
 // ─── Implementation ───────────────────────────────────────────────────────────
+/**
+ * Reference `SyncStateStore` implementation backed by a `Map`.
+ *
+ * # LRU semantics
+ *
+ * `Map` iteration order is insertion order, so we implement LRU by
+ * `delete` + `set` on every access — the most-recently-touched key ends up
+ * at the end of the iteration, and the oldest is `entries.keys().next().value`.
+ *
+ * # Expiry
+ *
+ * Lazy on `get()` / `has()`: expired entries are deleted when touched.
+ * Background sweep (optional) reclaims entries that are never re-read.
+ */
 class InMemoryStore {
+    _sync = true;
+    entries = new Map();
+    maxSize;
+    cleanupTimer;
     constructor(options = {}) {
-        // Discriminant read by isSyncStore() in execute() to enforce the dedupe
-        // constraint at runtime for JS callers who bypass TypeScript.
-        this._sync = true;
-        this.entries = new Map();
-        const { autoCleanup = false, cleanupIntervalMs = 30000 } = options;
+        const { autoCleanup = false, cleanupIntervalMs = 30_000, maxSize = Number.POSITIVE_INFINITY, } = options;
+        if (!Number.isFinite(maxSize) || maxSize <= 0) {
+            // Infinity is allowed (unbounded); any other non-positive finite value
+            // is a programmer error.
+            if (maxSize !== Number.POSITIVE_INFINITY) {
+                throw new RangeError(`Actly: InMemoryStore maxSize must be a positive finite number or Infinity, got ${maxSize}`);
+            }
+        }
+        this.maxSize = maxSize;
         if (autoCleanup) {
             const timer = setInterval(() => this._sweep(), cleanupIntervalMs);
-            // Prevent the interval from keeping the Node.js process alive when the
-            // application has otherwise finished its work. Safe no-op in browsers.
             if (isUnrefable(timer))
                 timer.unref();
             this.cleanupTimer = timer;
@@ -29,47 +49,71 @@ class InMemoryStore {
             this.entries.delete(key);
             return undefined;
         }
+        // LRU refresh: move to most-recent position.
+        // delete + set is the canonical pattern for reordering a Map.
+        this.entries.delete(key);
+        this.entries.set(key, entry);
         return entry.value;
     }
     set(key, value, ttlMs) {
-        // ttlMs = 0 or undefined → no expiry (sentinel null)
+        // Evict if at capacity AND adding a new key (updates don't grow size).
+        if (!this.entries.has(key) && this.entries.size >= this.maxSize) {
+            const oldest = this.entries.keys().next().value;
+            if (oldest !== undefined)
+                this.entries.delete(oldest);
+        }
         const expiresAt = ttlMs != null && ttlMs > 0 ? Date.now() + ttlMs : null;
+        // delete + set ensures the key is moved to the most-recent position
+        // even on update, keeping LRU order consistent.
+        this.entries.delete(key);
         this.entries.set(key, { value, expiresAt });
     }
     delete(key) {
         this.entries.delete(key);
     }
     has(key) {
-        // Delegate to get() so expired entries are evicted on access.
-        return this.get(key) !== undefined;
+        // Inline the expiry check to avoid the LRU side-effect of get().
+        // `has()` should be a pure query, not a touch.
+        const entry = this.entries.get(key);
+        if (!entry)
+            return false;
+        if (entry.expiresAt !== null && Date.now() > entry.expiresAt) {
+            this.entries.delete(key);
+            return false;
+        }
+        return true;
     }
-    /**
-     * Remove all entries.
-     * After this call, size() returns 0.
-     */
     clear() {
         this.entries.clear();
     }
     /**
      * Return the count of live (non-expired) entries.
      *
-     * Expired entries are evicted during the scan, so repeated calls are
-     * slightly cheaper as the map self-prunes. O(n) in the number of entries.
+     * Pure query — does NOT touch LRU order. Expired entries discovered during
+     * the scan are evicted opportunistically (they were already invisible to
+     * `get()`, so eviction has no observable effect beyond memory reclamation).
+     *
+     * Two-pass to avoid mutating the Map during iteration (spec-safe).
      */
     size() {
-        // Evict expired entries as we scan — keeps the map tidy between sweeps
-        // and ensures the returned count reflects only observable entries.
-        for (const key of this.entries.keys())
-            this.has(key);
-        return this.entries.size;
+        const now = Date.now();
+        const expired = [];
+        let count = 0;
+        for (const [key, entry] of this.entries) {
+            if (entry.expiresAt !== null && entry.expiresAt <= now) {
+                expired.push(key);
+            }
+            else {
+                count++;
+            }
+        }
+        for (const key of expired)
+            this.entries.delete(key);
+        return count;
     }
     /**
      * Stop the background cleanup timer and release internal state.
      * Safe to call multiple times — subsequent calls are no-ops.
-     *
-     * Call destroy() when discarding a long-lived store instance to prevent
-     * timer leaks. Stores without autoCleanup enabled have nothing to release,
-     * but destroy() is safe to call on them regardless.
      */
     destroy() {
         if (this.cleanupTimer !== undefined) {
@@ -77,15 +121,20 @@ class InMemoryStore {
             this.cleanupTimer = undefined;
         }
     }
-    // Sweep all entries and remove those past their expiry time.
-    // Called by the autoCleanup interval — not part of the public contract.
+    /**
+     * Sweep all entries and remove those past their expiry time.
+     * Called by the autoCleanup interval; not part of the public contract.
+     */
     _sweep() {
         const now = Date.now();
+        const expired = [];
         for (const [key, entry] of this.entries) {
             if (entry.expiresAt !== null && now > entry.expiresAt) {
-                this.entries.delete(key);
+                expired.push(key);
             }
         }
+        for (const key of expired)
+            this.entries.delete(key);
     }
 }
 exports.InMemoryStore = InMemoryStore;

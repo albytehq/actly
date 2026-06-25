@@ -1,9 +1,10 @@
 {
   "compilerOptions": {
-    "target":                     "ES2020",
+    "target":                     "ES2022",
     "module":                     "NodeNext",
     "moduleResolution":           "NodeNext",
-    "lib":                        ["ES2020", "DOM"],
+    "lib":                        ["ES2022"],
+    "types":                      ["node"],
     "strict":                     true,
     "noUncheckedIndexedAccess":   true,
     "forceConsistentCasingInFileNames": true,
@@ -12,7 +13,8 @@
     "sourceMap":                  true,
     "outDir":                     "dist",
     "rootDir":                    "src",
-    "skipLibCheck":               true
+    "skipLibCheck":               true,
+    "exactOptionalPropertyTypes": false
   },
   "include": ["src"],
   "exclude": ["node_modules", "dist"]
