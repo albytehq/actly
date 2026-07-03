@@ -11,7 +11,7 @@
 
 Report vulnerabilities privately.
 
-- Email: security@example.com
+- Email: albyte.inc@gmail.com
 - Do not open a public issue
 - Response within 48 hours
 - Fix or mitigation within 90 days
