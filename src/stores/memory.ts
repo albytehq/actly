@@ -1,4 +1,5 @@
 import type { SyncStateStore } from './base.js'
+import { LIMITS } from '../utils/limits.js'
 
 // ─── Internal types ───────────────────────────────────────────────────────────
 
@@ -6,12 +7,21 @@ interface Entry<T> {
   value: T
   // null = never expires (used by dedupe's in-flight promises)
   expiresAt: number | null
+  // Wall-clock timestamp when this entry was inserted/updated.
+  // Used by cachePolicy to report accurate `ageMs` in onCacheHit events.
+  insertedAt: number
+  // LRU doubly-linked list pointers. Undefined at the head/tail.
+  prev?: LRUNode
+  next?: LRUNode
+  key: string
 }
+
+// `Entry` IS the node — aliased for readability in the LRU list code.
+type LRUNode = Entry<unknown>
 
 // Node.js timers expose `unref()` to prevent the event loop from being kept
 // alive solely by a housekeeping interval. Browser timers do not. Duck-type
-// the check so the same code works in both environments without importing
-// `@types/node` at runtime.
+// the check so the same code works in both environments.
 interface UnrefableTimer {
   unref(): void
 }
@@ -26,11 +36,9 @@ export interface InMemoryStoreOptions {
   /**
    * Periodically sweep and remove expired entries in the background.
    *
-   * Disabled by default. The store evicts lazily on `get()` / `has()` access,
-   * which is sufficient for most use cases. Enable `autoCleanup` when the
-   * store is long-lived and accumulates many TTL'd entries that are never
-   * re-read — for example, a server-side cache that receives write-heavy
-   * traffic with low subsequent read rates.
+   * Disabled by default for explicit-store users. The DEFAULT module-level
+   * store (used when you call `act()` without `withStore()`) enables this
+   * automatically — see `core/act.ts`.
    */
   autoCleanup?: boolean
 
@@ -51,7 +59,8 @@ export interface InMemoryStoreOptions {
    * caches with high-cardinality keys to bound memory usage.
    *
    * The LRU order is updated on `get()` and `set()` — both move the accessed
-   * key to the most-recent position.
+   * key to the most-recent position. Implementation uses a doubly-linked
+   * list for O(1) reordering (no `delete + set` Map churn).
    */
   maxSize?: number
 }
@@ -59,13 +68,17 @@ export interface InMemoryStoreOptions {
 // ─── Implementation ───────────────────────────────────────────────────────────
 
 /**
- * Reference `SyncStateStore` implementation backed by a `Map`.
+ * Reference `SyncStateStore` implementation backed by a `Map` + doubly-linked
+ * list for LRU.
  *
- * # LRU semantics
+ * # Properties
  *
- * `Map` iteration order is insertion order, so we implement LRU by
- * `delete` + `set` on every access — the most-recently-touched key ends up
- * at the end of the iteration, and the oldest is `entries.keys().next().value`.
+ *  - `size()` is O(1) — tracked via a counter instead of full scan.
+ *  - LRU reordering uses an explicit doubly-linked list, avoiding the
+ *    `delete + set` Map churn that was 2 Map operations per `get()`.
+ *  - Default `maxSize` is bounded (`LIMITS.DEFAULT_STORE_MAX_SIZE`) when
+ *    used as the module-level default — prevents unbounded memory growth
+ *    in long-running servers.
  *
  * # Expiry
  *
@@ -75,8 +88,10 @@ export interface InMemoryStoreOptions {
 export class InMemoryStore implements SyncStateStore {
   readonly _sync = true as const
 
-  private readonly entries = new Map<string, Entry<unknown>>()
+  private readonly map = new Map<string, LRUNode>()
   private readonly maxSize: number
+  private head?: LRUNode  // least recently used
+  private tail?: LRUNode  // most recently used
   private cleanupTimer: ReturnType<typeof setInterval> | undefined
 
   constructor(options: InMemoryStoreOptions = {}) {
@@ -106,80 +121,89 @@ export class InMemoryStore implements SyncStateStore {
   }
 
   get<T>(key: string): T | undefined {
-    const entry = this.entries.get(key)
-    if (!entry) return undefined
+    const node = this.map.get(key)
+    if (!node) return undefined
 
-    if (entry.expiresAt !== null && Date.now() > entry.expiresAt) {
-      this.entries.delete(key)
+    if (node.expiresAt !== null && Date.now() > node.expiresAt) {
+      this._removeNode(node)
+      this.map.delete(key)
       return undefined
     }
 
-    // LRU refresh: move to most-recent position.
-    // delete + set is the canonical pattern for reordering a Map.
-    this.entries.delete(key)
-    this.entries.set(key, entry)
+    // LRU refresh: move to tail (most-recent).
+    this._moveToTail(node)
 
-    return entry.value as T
+    return node.value as T
   }
 
   set<T>(key: string, value: T, ttlMs?: number): void {
-    // Evict if at capacity AND adding a new key (updates don't grow size).
-    if (!this.entries.has(key) && this.entries.size >= this.maxSize) {
-      const oldest = this.entries.keys().next().value
-      if (oldest !== undefined) this.entries.delete(oldest)
+    const existing = this.map.get(key)
+    const now = Date.now()
+
+    if (existing) {
+      // Update in place — don't grow size, don't evict.
+      existing.value = value
+      existing.expiresAt = ttlMs != null && ttlMs > 0 ? now + ttlMs : null
+      existing.insertedAt = now
+      this._moveToTail(existing)
+      return
     }
 
-    const expiresAt = ttlMs != null && ttlMs > 0 ? Date.now() + ttlMs : null
-    // delete + set ensures the key is moved to the most-recent position
-    // even on update, keeping LRU order consistent.
-    this.entries.delete(key)
-    this.entries.set(key, { value, expiresAt })
+    // New key — evict if at capacity.
+    while (this.map.size >= this.maxSize && this.head) {
+      const evict = this.head
+      this._removeNode(evict)
+      this.map.delete(evict.key)
+    }
+
+    const node: LRUNode = {
+      key,
+      value,
+      expiresAt: ttlMs != null && ttlMs > 0 ? now + ttlMs : null,
+      insertedAt: now,
+    }
+    this.map.set(key, node)
+    this._appendTail(node)
   }
 
   delete(key: string): void {
-    this.entries.delete(key)
+    const node = this.map.get(key)
+    if (!node) return
+    this._removeNode(node)
+    this.map.delete(key)
   }
 
   has(key: string): boolean {
     // Inline the expiry check to avoid the LRU side-effect of get().
     // `has()` should be a pure query, not a touch.
-    const entry = this.entries.get(key)
-    if (!entry) return false
-    if (entry.expiresAt !== null && Date.now() > entry.expiresAt) {
-      this.entries.delete(key)
+    const node = this.map.get(key)
+    if (!node) return false
+    if (node.expiresAt !== null && Date.now() > node.expiresAt) {
+      this._removeNode(node)
+      this.map.delete(key)
       return false
     }
     return true
   }
 
   clear(): void {
-    this.entries.clear()
+    this.map.clear()
+    this.head = undefined
+    this.tail = undefined
   }
 
   /**
    * Return the count of live (non-expired) entries.
    *
-   * Pure query — does NOT touch LRU order. Expired entries discovered during
-   * the scan are evicted opportunistically (they were already invisible to
-   * `get()`, so eviction has no observable effect beyond memory reclamation).
+   * O(1) — returns the Map size directly. Expired-but-not-yet-
+   * evicted entries are counted; they're reclaimed lazily on next access
+   * or by the background sweep. This is intentional: a fully-accurate
+   * count would require an O(n) scan, defeating the purpose.
    *
-   * Two-pass to avoid mutating the Map during iteration (spec-safe).
+   * Pure query — does NOT touch LRU order.
    */
   size(): number {
-    const now = Date.now()
-    const expired: string[] = []
-    let count = 0
-
-    for (const [key, entry] of this.entries) {
-      if (entry.expiresAt !== null && entry.expiresAt <= now) {
-        expired.push(key)
-      } else {
-        count++
-      }
-    }
-
-    for (const key of expired) this.entries.delete(key)
-    return count
+    return this.map.size
   }
 
   /**
@@ -193,18 +217,78 @@ export class InMemoryStore implements SyncStateStore {
     }
   }
 
+  // ─── LRU list operations ──────────────────────────────────────────────────
+  //
+  // All operations are O(1). The list runs head (LRU) → tail (MRU).
+
+  private _appendTail(node: LRUNode): void {
+    if (this.tail) {
+      this.tail.next = node
+      node.prev = this.tail
+      node.next = undefined
+    } else {
+      // Empty list — node is both head and tail.
+      this.head = node
+    }
+    this.tail = node
+  }
+
+  private _removeNode(node: LRUNode): void {
+    if (node.prev) {
+      node.prev.next = node.next
+    } else {
+      this.head = node.next
+    }
+    if (node.next) {
+      node.next.prev = node.prev
+    } else {
+      this.tail = node.prev
+    }
+    node.prev = undefined
+    node.next = undefined
+  }
+
+  private _moveToTail(node: LRUNode): void {
+    if (this.tail === node) return  // already MRU
+    this._removeNode(node)
+    this._appendTail(node)
+  }
+
   /**
    * Sweep all entries and remove those past their expiry time.
    * Called by the autoCleanup interval; not part of the public contract.
+   *
+   * Two-pass to avoid mutating the Map during iteration (spec-safe).
    */
   private _sweep(): void {
     const now = Date.now()
     const expired: string[] = []
-    for (const [key, entry] of this.entries) {
-      if (entry.expiresAt !== null && now > entry.expiresAt) {
+    for (const [key, node] of this.map) {
+      if (node.expiresAt !== null && now > node.expiresAt) {
         expired.push(key)
       }
     }
-    for (const key of expired) this.entries.delete(key)
+    for (const key of expired) {
+      const node = this.map.get(key)
+      if (node) {
+        this._removeNode(node)
+        this.map.delete(key)
+      }
+    }
   }
+}
+
+/**
+ * Factory for the default module-level store.
+ *
+ * Bounded by `LIMITS.DEFAULT_STORE_MAX_SIZE` with background sweep —
+ * prevents unbounded memory growth in long-running servers without
+ * requiring callers to opt in.
+ */
+export function createDefaultStore(): InMemoryStore {
+  return new InMemoryStore({
+    maxSize: LIMITS.DEFAULT_STORE_MAX_SIZE,
+    autoCleanup: true,
+    cleanupIntervalMs: LIMITS.DEFAULT_STORE_CLEANUP_INTERVAL_MS,
+  })
 }

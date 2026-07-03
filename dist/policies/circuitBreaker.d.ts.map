@@ -1,0 +1,1 @@
+{"version":3,"file":"circuitBreaker.d.ts","sourceRoot":"","sources":["../../src/policies/circuitBreaker.ts"],"names":[],"mappings":"AAAA,OAAO,KAAK,EAAS,aAAa,EAAiB,qBAAqB,EAAE,MAAM,mBAAmB,CAAA;AAwBnG,wBAAgB,oBAAoB,CAAC,CAAC,EAAE,IAAI,EAAE,qBAAqB,GAAG,aAAa,CAAC,CAAC,CAAC,CA2ErF"}

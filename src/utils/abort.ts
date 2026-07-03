@@ -1,41 +1,64 @@
 // ─── AbortSignal helpers ──────────────────────────────────────────────────────
 //
-// Centralised utilities for composing AbortSignals. These exist because
-// Node 18 lacks `AbortSignal.any` (added in Node 20) and we want to keep
-// the `engines` floor at 18 for backwards compatibility with existing
-// consumers.
+// Contract: zero listener accumulation on long-lived AbortSignals.
+//
+// Every `addEventListener('abort', ...)` MUST be paired with a
+// `removeEventListener` on the success path, OR use `AbortSignal.any()`
+// (Node 20+ native) which handles cleanup automatically.
+//
+// Long-lived signals (server shutdown, request pool) must not accumulate
+// one listener per `act()` call — that would cause
+// `MaxListenersExceededWarning` and unbounded closure retention.
 
 /**
- * Polyfill for `AbortSignal.any(signals)` (Node 20+).
+ * Compose multiple AbortSignals into one. Aborts when ANY input aborts,
+ * with the same reason.
  *
- * Returns a single signal that aborts when ANY of the input signals aborts,
- * with the same reason. If any input is already aborted, the returned signal
- * is aborted synchronously.
+ * Uses native `AbortSignal.any()` on Node 20+ (zero allocations, no
+ * listener leaks — the runtime owns the lifecycle). Falls back to a
+ * polyfill that explicitly removes listeners on first abort.
  *
- * Listener registration is `{ once: true }` — once any signal fires, we stop
- * listening on the others. The composite signal cannot be "un-aborted".
+ * # Listener safety
+ *
+ * The polyfill registers `{ once: true }` listeners on each input and
+ * manually removes the others when one fires. After settlement, the
+ * composite signal holds zero references to the inputs — they may be GC'd.
  */
 export function anySignal(signals: ReadonlyArray<AbortSignal>): AbortSignal {
-  // Fast path: native implementation (Node 20+, modern browsers, Bun).
-  // The cast is safe — the runtime check guards the call.
+  // Filter out undefined / null defensively.
+  const filtered = signals.filter((s): s is AbortSignal => s != null)
+  if (filtered.length === 0) {
+    // No inputs → never-aborting signal. Use a fresh controller so callers
+    // get a real AbortSignal, not a hand-rolled mock.
+    return new AbortController().signal
+  }
+  if (filtered.length === 1) return filtered[0]!
+
+  // Native path (Node 20+, modern browsers, Bun).
   const native = (AbortSignal as unknown as {
     any?: (signals: ReadonlyArray<AbortSignal>) => AbortSignal
   }).any
-  if (typeof native === 'function') return native.call(AbortSignal, signals)
+  if (typeof native === 'function') {
+    return native.call(AbortSignal, filtered)
+  }
 
-  // Polyfill for Node 18.
+  // Polyfill: only used when native is missing. Listener-safe.
   const controller = new AbortController()
+  const listeners: Array<() => void> = []
 
-  for (const signal of signals) {
+  for (const signal of filtered) {
     if (signal.aborted) {
       controller.abort(signal.reason)
       break
     }
-    signal.addEventListener(
-      'abort',
-      () => controller.abort(signal.reason),
-      { once: true },
-    )
+    const onAbort = () => {
+      controller.abort(signal.reason)
+      // Remove all other listeners — they hold closures over `signal`
+      // and would otherwise keep the inputs alive past settlement.
+      for (const off of listeners) off()
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    listeners.push(() => signal.removeEventListener('abort', onAbort))
   }
 
   return controller.signal
@@ -48,18 +71,30 @@ export function anySignal(signals: ReadonlyArray<AbortSignal>): AbortSignal {
  * - If the signal aborts while the promise is pending, rejects with `signal.reason`.
  * - If the promise settles first, returns its value (or rejects with its error).
  *
- * The listener is registered with `{ once: true }` and never leaks: either
- * the signal fires (listener auto-removed) or the promise settles (the
- * signal will eventually be GC'd along with the listener).
+ * # Listener safety
  *
- * Used by `dedupePolicy` so joiners can cancel their own `await` even if the
- * originator's `fn` is still running.
+ * On success path, the abort listener is explicitly removed. A
+ * `{ once: true }` listener would stay attached on long-lived signals,
+ * leaking one closure per call.
+ *
+ * # Mark-as-handled
+ *
+ * When the signal aborts first, the original `promise` may still settle
+ * later (success or failure). We attach a no-op `.catch` to it so V8
+ * doesn't emit an `unhandledRejection` warning. The error is NOT
+ * swallowed from the caller — the caller already received `signal.reason`.
  */
 export function raceAbort<T>(
   promise: Promise<T>,
   signal: AbortSignal,
 ): Promise<T> {
-  if (signal.aborted) return Promise.reject<T>(signal.reason)
+  if (signal.aborted) {
+    // Mark the promise as handled — its eventual rejection won't surface
+    // as an unhandled rejection. Its eventual success is dropped silently,
+    // which is correct: the caller has already moved on.
+    promise.catch(() => {})
+    return Promise.reject<T>(signal.reason)
+  }
 
   return new Promise<T>((resolve, reject) => {
     let settled = false
@@ -67,20 +102,25 @@ export function raceAbort<T>(
     const onAbort = () => {
       if (settled) return
       settled = true
+      signal.removeEventListener('abort', onAbort)
       reject(signal.reason)
     }
 
-    signal.addEventListener('abort', onAbort, { once: true })
+    // Not using `{ once: true }` — we want explicit removal on success
+    // path so the listener doesn't linger on a long-lived signal.
+    signal.addEventListener('abort', onAbort)
 
     promise.then(
       (value) => {
         if (settled) return
         settled = true
+        signal.removeEventListener('abort', onAbort)
         resolve(value)
       },
       (error) => {
         if (settled) return
         settled = true
+        signal.removeEventListener('abort', onAbort)
         reject(error)
       },
     )
@@ -94,9 +134,11 @@ export function raceAbort<T>(
  * signal aborts before the timer fires. If the signal is already aborted
  * when called, rejects synchronously (in microtask).
  *
- * Used by `retryPolicy` to make backoff delays interruptible: when an outer
- * `totalTimeout` fires mid-delay, the delay rejects immediately instead of
- * blocking the retry loop until the timer would have elapsed.
+ * # Timer hygiene
+ *
+ * The internal `setTimeout` is `unref`'d on Node so it doesn't keep the
+ * event loop alive solely for this sleep. On browsers there is no
+ * equivalent — the timer is short-lived enough not to matter.
  */
 export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (ms <= 0) {
@@ -111,13 +153,19 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
       signal?.removeEventListener('abort', onAbort)
       resolve()
     }, ms)
+    // NOTE: do NOT `unref()` this timer. Unlike InMemoryStore's autoCleanup
+    // interval (which is a background housekeeping task), `sleep()` IS the
+    // operation the caller is awaiting. If we unref'd it, Node could exit
+    // the process while a retry delay was pending — silently dropping the
+    // operation. The timer is short-lived (cleared in onAbort or after ms),
+    // so the cost of keeping the loop alive is bounded.
 
     const onAbort = () => {
       clearTimeout(timer)
       reject(signal!.reason)
     }
 
-    signal?.addEventListener('abort', onAbort, { once: true })
+    signal?.addEventListener('abort', onAbort)
   })
 }
 
@@ -130,33 +178,49 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 export function isAbortError(err: unknown): boolean {
   if (err == null || typeof err !== 'object') return false
   const name = (err as { name?: unknown }).name
-  return name === 'AbortError' || name === 'TimeoutError' &&
+  if (name === 'AbortError') return true
+  // DOMException with name 'TimeoutError' is what AbortSignal.timeout throws.
+  // Distinguish from our own TimeoutError class by checking for DOMException.
+  if (
+    name === 'TimeoutError' &&
     err instanceof Error &&
-    // DOMException with name 'TimeoutError' is what AbortSignal.timeout throws.
-    // Distinguish from our own TimeoutError class by checking for DOMException.
     typeof DOMException !== 'undefined' &&
     err instanceof DOMException
+  ) {
+    return true
+  }
+  return false
 }
 
 /**
  * Link a parent signal to a child controller: when the parent aborts, the
- * child is aborted with the same reason. No-op if the parent is already
- * aborted (the caller should check `parent.aborted` separately if it cares
- * about synchronous abort).
+ * child is aborted with the same reason.
  *
- * The listener is `{ once: true }` — no leak.
+ * # Contract
+ *
+ * Returns an `unlink()` function that removes the listener. Callers MUST
+ * call `unlink()` on success path — otherwise the listener stays attached
+ * to the parent forever, leaking one closure per call.
+ *
+ * If the parent is already aborted, the child is aborted synchronously
+ * and `unlink` is a no-op.
+ *
+ * # Prefer `anySignal()` instead
+ *
+ * For new code, prefer `anySignal([parent, timeoutSignal])` which uses
+ * the native Node 20+ implementation and handles cleanup automatically.
+ * This function exists for call sites that need an `AbortController`
+ * (not just a signal) — e.g. to layer additional abort sources.
  */
 export function linkSignal(
   parent: AbortSignal,
   child: AbortController,
-): void {
+): () => void {
   if (parent.aborted) {
     child.abort(parent.reason)
-    return
+    return () => {}
   }
-  parent.addEventListener(
-    'abort',
-    () => child.abort(parent.reason),
-    { once: true },
-  )
+  const onAbort = () => child.abort(parent.reason)
+  parent.addEventListener('abort', onAbort)
+  return () => parent.removeEventListener('abort', onAbort)
 }

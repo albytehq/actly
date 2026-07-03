@@ -4,50 +4,9 @@ exports.TotalTimeoutError = exports.TimeoutError = void 0;
 exports.timeoutPolicy = timeoutPolicy;
 exports.totalTimeoutPolicy = totalTimeoutPolicy;
 const abort_js_1 = require("../utils/abort.js");
-// ─── Errors ───────────────────────────────────────────────────────────────────
-/**
- * Thrown when a per-attempt `timeout` deadline fires.
- *
- * Carries the configured `ms` so callers can log/alert precisely:
- *
- * ```ts
- * if (!result.ok && result.error instanceof TimeoutError) {
- *   console.log(`attempt timed out after ${result.error.ms}ms`)
- * }
- * ```
- */
-class TimeoutError extends Error {
-    ms;
-    constructor(ms) {
-        super(`ACT timed out after ${ms}ms`);
-        this.name = 'TimeoutError';
-        this.ms = ms;
-    }
-}
-exports.TimeoutError = TimeoutError;
-/**
- * Thrown when the operation-wide `totalTimeout` budget fires.
- *
- * Distinct from `TimeoutError` (per-attempt) so callers can `instanceof`-check
- * which deadline fired:
- *
- * ```ts
- * if (result.error instanceof TotalTimeoutError) {
- *   // whole operation budget exhausted
- * } else if (result.error instanceof TimeoutError) {
- *   // last attempt's per-attempt deadline fired
- * }
- * ```
- */
-class TotalTimeoutError extends Error {
-    ms;
-    constructor(ms) {
-        super(`ACT total timeout exceeded after ${ms}ms`);
-        this.name = 'TotalTimeoutError';
-        this.ms = ms;
-    }
-}
-exports.TotalTimeoutError = TotalTimeoutError;
+const errors_js_1 = require("../errors.js");
+Object.defineProperty(exports, "TimeoutError", { enumerable: true, get: function () { return errors_js_1.TimeoutError; } });
+Object.defineProperty(exports, "TotalTimeoutError", { enumerable: true, get: function () { return errors_js_1.TotalTimeoutError; } });
 // ─── Policy ───────────────────────────────────────────────────────────────────
 /**
  * Build a timeout policy that throws `ErrorCtor` on deadline.
@@ -76,16 +35,21 @@ exports.TotalTimeoutError = TotalTimeoutError;
  * reason (could be `TotalTimeoutError`, an `AbortError`, or anything else).
  */
 function makeTimeoutPolicy(opts, ErrorCtor) {
-    return (fn, _ctx) => async (parentSignal) => {
+    return (fn, ctx) => async (parentSignal) => {
         const controller = new AbortController();
-        const timerError = new ErrorCtor(opts.ms);
+        // Pass key to the error ctor for better debugging context.
+        const timerError = new ErrorCtor(opts.ms, { key: ctx.key });
         // Arm the per-attempt timer. The error object is allocated once so the
         // stack trace points here (the policy frame), not at setTimeout's
         // internal callback.
         const timer = setTimeout(() => controller.abort(timerError), opts.ms);
-        // Link parent -> child. If parent is already aborted, child aborts
-        // synchronously with parent's reason.
-        (0, abort_js_1.linkSignal)(parentSignal, controller);
+        // NOTE: do NOT `unref()` this timer. The timeout IS the operation
+        // the caller is awaiting. unref'ing would let Node exit the process
+        // while a timeout was pending — silently dropping the operation.
+        // The timer is cleared in the finally block below.
+        // Link parent → child. Capture the unlink function so we can clean
+        // up the listener on success path (contract).
+        const unlink = (0, abort_js_1.linkSignal)(parentSignal, controller);
         try {
             // Race fn against the abort event. If fn settles first, we get its
             // result/error. If the signal aborts first, we reject with reason.
@@ -97,12 +61,20 @@ function makeTimeoutPolicy(opts, ErrorCtor) {
                     reject(controller.signal.reason);
                     return;
                 }
-                controller.signal.addEventListener('abort', () => reject(controller.signal.reason), { once: true });
-                Promise.resolve(fn(controller.signal)).then((value) => resolve(value), (error) => reject(error));
+                const onAbort = () => reject(controller.signal.reason);
+                controller.signal.addEventListener('abort', onAbort, { once: true });
+                Promise.resolve(fn(controller.signal)).then((value) => {
+                    controller.signal.removeEventListener('abort', onAbort);
+                    resolve(value);
+                }, (error) => {
+                    controller.signal.removeEventListener('abort', onAbort);
+                    reject(error);
+                });
             });
         }
         finally {
             clearTimeout(timer);
+            unlink();
         }
     };
 }
@@ -113,7 +85,7 @@ function makeTimeoutPolicy(opts, ErrorCtor) {
  * own clock.
  */
 function timeoutPolicy(opts) {
-    return makeTimeoutPolicy(opts, TimeoutError);
+    return makeTimeoutPolicy(opts, errors_js_1.TimeoutError);
 }
 /**
  * Operation-wide timeout. Races the ENTIRE chain (all retry attempts +
@@ -123,5 +95,5 @@ function timeoutPolicy(opts) {
  * policy runs and stops regardless of what the inner chain is doing.
  */
 function totalTimeoutPolicy(opts) {
-    return makeTimeoutPolicy(opts, TotalTimeoutError);
+    return makeTimeoutPolicy(opts, errors_js_1.TotalTimeoutError);
 }

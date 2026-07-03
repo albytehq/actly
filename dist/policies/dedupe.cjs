@@ -6,36 +6,28 @@ const abort_js_1 = require("../utils/abort.js");
 // Namespace so dedupe keys never collide with cache keys in the shared store.
 const NS = 'dedupe:';
 /**
+ * Module-level generation counter. Monotonic — guarantees uniqueness
+ * across the lifetime of the process. Wraps at `Number.MAX_SAFE_INTEGER`
+ * (which would take ~285 000 years at 1M increments/sec).
+ */
+let generationCounter = 0;
+function nextGeneration() {
+    generationCounter = (generationCounter + 1) % Number.MAX_SAFE_INTEGER;
+    return generationCounter;
+}
+/**
  * Collapse concurrent calls that share the same key into one in-flight Promise.
  *
- * # How it works
+ * # Properties
  *
- * The first caller (originator) starts the work and stores
- * `{ promise, meta }` in the store under `dedupe:<key>`. Every subsequent
- * caller that arrives before the promise settles receives the SAME promise
- * — no duplicate work.
- *
- * # Shared `meta` (fixes v1.0 trade-off)
- *
- * The originator's `ctx.meta` reference is stored alongside the promise.
- * Inner policies (e.g. `retryPolicy`) mutate it as they run. After the
- * promise settles, joiners copy `attempts` and `source` from the shared
- * meta into their own `ctx.meta`. This means a joiner's `ActResult.attempts`
- * reflects the real effort (e.g. `3` if the originator retried twice), not
- * the misleading default of `1`.
- *
- * # Abort safety (fixes hung-fn block)
- *
- * Joiners race the in-flight promise against their own AbortSignal via
- * `raceAbort`. If a joiner's signal aborts (e.g. their `totalTimeout`
- * fires), they reject immediately — they don't have to wait for the
- * originator to finish. The originator's promise continues in the
- * background for any other joiners that haven't aborted.
- *
- * If `inflightTtl` is set, the store entry is also TTL'd: if the
- * originator never settles, new callers can start fresh after the TTL
- * expires (the original promise still leaks unless an outer timeout
- * fires, but new callers aren't blocked).
+ *  - **Generation-safe cleanup**: stale originators never delete newer
+ *    entries when `inflightTtl` triggers replacement.
+ *  - **Joiner isolation**: originator's caller-signal abort does NOT
+ *    propagate to joiners. Each joiner races the shared in-flight promise
+ *    against their OWN signal only.
+ *  - **Truthful joiner attempts**: joiners that abort before the originator
+ *    settles report `attempts: 0` (they did no work), not the originator's
+ *    in-progress count.
  *
  * # INVARIANT: requires SyncStateStore
  *
@@ -54,34 +46,71 @@ function dedupePolicy(opts = { enabled: true }) {
         const syncCtx = ctx;
         return async (signal) => {
             const key = NS + syncCtx.key;
-            // Fast path: an in-flight promise already exists. Join it.
-            // raceAbort ensures we don't block on a hung originator if our own
-            // signal aborts.
+            // ─── Fast path: an in-flight promise already exists. Join it. ──────
+            //
+            // The joiner races the in-flight promise against THEIR OWN signal.
+            // They do NOT inherit the originator's signal state — if the
+            // originator's caller cancels, joiners continue waiting (or get
+            // the eventual settled value).
             const existing = syncCtx.store.get(key);
             if (existing) {
                 try {
                     const value = await (0, abort_js_1.raceAbort)(existing.promise, signal);
-                    return value;
-                }
-                finally {
-                    // Copy the originator's final meta into our own, regardless of
-                    // success or failure. By the time `existing.promise` has settled
-                    // (or our signal aborted), the originator's retry loop has set
-                    // the final attempt count.
+                    // Success — copy originator's final meta (attempts, source)
+                    // so the joiner's ActResult reflects the real effort.
                     syncCtx.meta.attempts = existing.meta.attempts;
                     syncCtx.meta.source = existing.meta.source;
+                    return value;
+                }
+                catch (err) {
+                    // Joiner either aborted (their own signal) or got the
+                    // originator's settled error.
+                    if (signal.aborted) {
+                        // Joiner's own signal aborted before originator settled.
+                        // They did no work — report `attempts: 0` (truthful).
+                        syncCtx.meta.attempts = 0;
+                        // source stays 'fresh' (default) — joiner didn't read from cache
+                    }
+                    else {
+                        // Originator settled with failure — copy its final meta.
+                        syncCtx.meta.attempts = existing.meta.attempts;
+                        syncCtx.meta.source = existing.meta.source;
+                    }
+                    throw err;
                 }
             }
-            // Originator path: start the work and publish the promise.
+            // ─── Originator path: start the work and publish the promise. ──────
             //
-            // We race fn against `signal` so that if our own signal aborts while
-            // fn is pending, we reject (and the .finally cleans up the store).
-            // The stored promise is the RACED one — joiners see the same
-            // rejection if they join before cleanup.
-            const promise = (0, abort_js_1.raceAbort)(Promise.resolve(fn(signal)), signal).finally(() => syncCtx.store.delete(key));
-            const entry = { promise, meta: syncCtx.meta };
+            // The stored promise is the RAW fn(signal) — NOT raceAbort-wrapped.
+            // This is critical: if we stored raceAbort(fn, signal), an
+            // originator signal abort would cause the stored promise to reject,
+            // which would propagate to all joiners. Instead:
+            //   - stored: raw fn(signal) — joiners await this
+            //   - originator's await: raceAbort(stored, signal) — originator
+            //     can bail out on their own signal without affecting joiners
+            const generation = nextGeneration();
+            const rawPromise = Promise.resolve(fn(signal));
+            const entry = {
+                promise: rawPromise,
+                meta: syncCtx.meta,
+                generation,
+            };
             syncCtx.store.set(key, entry, inflightTtl);
-            return promise;
+            // Cleanup on settle: only delete if generation matches. If a newer
+            // originator has replaced this entry (because inflightTtl expired),
+            // our cleanup is a no-op — the newer entry stays.
+            const cleanup = () => {
+                const current = syncCtx.store.get(key);
+                if (current && current.generation === generation) {
+                    syncCtx.store.delete(key);
+                }
+            };
+            // Attach cleanup to the RAW promise (not the raceAbort-wrapped one)
+            // so cleanup runs whenever fn settles, regardless of originator abort.
+            rawPromise.then(cleanup, cleanup);
+            // Originator races the raw promise against their own signal —
+            // they can bail out without affecting joiners.
+            return (0, abort_js_1.raceAbort)(rawPromise, signal);
         };
     };
     applier[executor_js_1.REQUIRES_SYNC_STORE] = true;

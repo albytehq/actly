@@ -34,6 +34,8 @@ export async function execute(input) {
         key: input.key,
         store: input.store,
         meta: input.meta,
+        // Thread observability through. Policies read this lazily.
+        observability: input.observability,
     };
     // Build the call chain from inside out.
     // reduceRight ensures policies[0] becomes the outermost wrapper (runs first).

@@ -7,6 +7,9 @@ import {
   InMemoryStore,
   TimeoutError,
   TotalTimeoutError,
+  RetryExhaustedError,
+  ActlyError,
+  ActlyAbortError,
   isSyncStore,
   isAsyncStore,
   REQUIRES_SYNC_STORE,
@@ -150,7 +153,7 @@ describe('retry policy (fixes M-7 jitter, M-4 validation, M-2 shouldRetry)', () 
     if (r.ok) expect(r.attempts).toBe(3)
   })
 
-  it('surfaces last error when all attempts fail', async () => {
+  it('surfaces last error wrapped in RetryExhaustedError when retries happened', async () => {
     let calls = 0
     const r = await act('retry:all-fail', async () => {
       calls++
@@ -159,8 +162,17 @@ describe('retry policy (fixes M-7 jitter, M-4 validation, M-2 shouldRetry)', () 
 
     expect(r.ok).toBe(false)
     expect(calls).toBe(3)
-    if (!r.ok) expect((r.error as Error).message).toBe('fail-3')
     expect(r.attempts).toBe(3)
+    // Errors are wrapped in RetryExhaustedError when retries happened.
+    // The raw last error is available on `.lastError` and `.errors[]`.
+    if (!r.ok) {
+      const err = r.error as { message?: string; lastError?: Error; errors?: Error[]; attempts?: number }
+      expect(err.message).toMatch(/retry exhausted after 3 attempts/)
+      expect(err.lastError?.message).toBe('fail-3')
+      expect(err.errors?.length).toBe(3)
+      expect(err.errors?.[2]?.message).toBe('fail-3')
+      expect(err.attempts).toBe(3)
+    }
   })
 
   it('respects shouldRetry=false to bail early', async () => {
@@ -476,7 +488,7 @@ describe('dedupe policy (fixes C-3 hung fn, C-5 shared meta)', () => {
   })
 
   it('joiner can abort independently without blocking on hung originator (fixes C-3)', async () => {
-    let originatorResolve: () => void
+    let originatorResolve!: (v: string) => void
     const hungPromise = new Promise<string>((resolve) => { originatorResolve = resolve })
 
     // Originator starts a hung fn
@@ -502,7 +514,7 @@ describe('dedupe policy (fixes C-3 hung fn, C-5 shared meta)', () => {
     expect(elapsed).toBeLessThan(300) // Returned well within hung originator's indefinite wait
 
     // Cleanup: resolve originator so the test can exit
-    originatorResolve!()
+    originatorResolve('finally')
     const originatorResult = await originatorPromise
     expect(originatorResult.ok).toBe(true)
   })
@@ -757,33 +769,35 @@ describe('invalidate() and withStore()', () => {
   })
 
   it('withStore with async store works for cache (no dedupe)', async () => {
+    // Closure-captured map (instead of `this._map`) so the object literal
+    // satisfies AsyncStateStore without excess-property violations.
+    const map = new Map<string, { value: unknown; expiresAt: number | null }>()
     const asyncStore: AsyncStateStore = {
       _sync: false as const,
-      _map: new Map<string, { value: unknown; expiresAt: number | null }>(),
       async get<T>(key: string): Promise<T | undefined> {
-        const e = this._map.get(key)
+        const e = map.get(key)
         if (!e) return undefined
         if (e.expiresAt !== null && Date.now() > e.expiresAt) {
-          this._map.delete(key)
+          map.delete(key)
           return undefined
         }
         return e.value as T
       },
       async set<T>(key: string, value: T, ttlMs?: number): Promise<void> {
-        this._map.set(key, { value, expiresAt: ttlMs ? Date.now() + ttlMs : null })
+        map.set(key, { value, expiresAt: ttlMs ? Date.now() + ttlMs : null })
       },
-      async delete(key: string): Promise<void> { this._map.delete(key) },
+      async delete(key: string): Promise<void> { map.delete(key) },
       async has(key: string): Promise<boolean> {
-        const e = this._map.get(key)
+        const e = map.get(key)
         if (!e) return false
         if (e.expiresAt !== null && Date.now() > e.expiresAt) {
-          this._map.delete(key)
+          map.delete(key)
           return false
         }
         return true
       },
-      async clear(): Promise<void> { this._map.clear() },
-      async size(): Promise<number> { return this._map.size },
+      async clear(): Promise<void> { map.clear() },
+      async size(): Promise<number> { return map.size },
     }
 
     const scopedAct = withStore(asyncStore)

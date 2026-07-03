@@ -1,4 +1,4 @@
-import type { ActFn, PolicyApplier, AnyStateStore, RunMeta } from '../types/index.js';
+import type { ActFn, PolicyApplier, AnyStateStore, RunMeta, ObservabilityContext } from '../types/index.js';
 /**
  * Symbol stamped onto `PolicyApplier` functions by `dedupePolicy`.
  *
@@ -31,6 +31,11 @@ export interface ExecutorInput<T> {
      * inward.
      */
     signal: AbortSignal;
+    /**
+     * Observability context. When present, policies emit events
+     * via the hooks. When absent (the common case), zero overhead.
+     */
+    observability?: ObservabilityContext;
 }
 /**
  * Pure execution engine.

@@ -31,9 +31,30 @@ export {
 // ─── Error classes ────────────────────────────────────────────────────────────
 
 export {
+  ActlyError,
+  ActlyAbortError,
   TimeoutError,
   TotalTimeoutError,
-} from './policies/timeout.js'
+  RetryExhaustedError,
+  ValidationError,
+} from './errors.js'
+
+// ─── Observability ───────────────────────────────────────────────────────────
+
+export type {
+  ActlyEventType,
+  ActlyEventBase,
+  AttemptEvent,
+  RetryEvent,
+  CacheHitEvent,
+  CacheMissEvent,
+  DedupeJoinEvent,
+  TimeoutEvent,
+  FinalSuccessEvent,
+  FinalFailureEvent,
+  ActlyEvent,
+  ObservabilityHooks,
+} from './observability.js'
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -58,8 +79,86 @@ export type {
   RunMeta,
 
   // Store types
-  StateStore,        // v1.0 alias for SyncStateStore (zero breakage)
+  StateStore,        // alias for SyncStateStore (backwards compat)
   SyncStateStore,
   AsyncStateStore,
   AnyStateStore,
+} from './types/index.js'
+
+// ─── Utilities (for custom policy authors) ────────────────────────────────────
+
+export {
+  anySignal,
+  raceAbort,
+  sleep,
+  linkSignal,
+  isAbortError,
+} from './utils/abort.js'
+
+export {
+  sanitizeKey,
+} from './utils/key.js'
+
+export {
+  computeDelay,
+} from './utils/backoff.js'
+
+export {
+  LIMITS,
+} from './utils/limits.js'
+
+export type { Limits } from './utils/limits.js'
+
+// ─── Hardening: new error classes ────────────────────────────────────────────
+
+export {
+  CircuitBreakerOpenError,
+  BulkheadOverflowError,
+  RateLimitError,
+} from './errors.js'
+
+// ─── Hardening: health check & graceful shutdown ─────────────────────────────
+
+export {
+  createHealthCheck,
+} from './core/health.js'
+export type { HealthStatus } from './core/health.js'
+
+export {
+  drain,
+} from './core/shutdown.js'
+
+// ─── Hardening: tenant isolation ─────────────────────────────────────────────
+
+export {
+  createTenantStore,
+  createAsyncTenantStore,
+} from './core/tenant.js'
+export type { TenantStoreOptions, TenantManager } from './core/tenant.js'
+
+// ─── Hardening: error sanitization ───────────────────────────────────────────
+
+export {
+  sanitizeErrorMessage,
+  sanitizeError,
+} from './utils/sanitize.js'
+
+// ─── Hardening: AbortController pool ─────────────────────────────────────────
+
+export {
+  acquireController,
+  releaseController,
+  poolSize,
+} from './utils/abortPool.js'
+
+// ─── Hardening: policy types ─────────────────────────────────────────────────
+
+export type {
+  CircuitBreakerOptions,
+  BulkheadOptions,
+  RateLimitOptions,
+  HedgeOptions,
+  FallbackOptions,
+  AuditOptions,
+  AuditEntry,
 } from './types/index.js'

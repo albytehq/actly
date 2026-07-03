@@ -1,12 +1,16 @@
 /**
- * Polyfill for `AbortSignal.any(signals)` (Node 20+).
+ * Compose multiple AbortSignals into one. Aborts when ANY input aborts,
+ * with the same reason.
  *
- * Returns a single signal that aborts when ANY of the input signals aborts,
- * with the same reason. If any input is already aborted, the returned signal
- * is aborted synchronously.
+ * Uses native `AbortSignal.any()` on Node 20+ (zero allocations, no
+ * listener leaks — the runtime owns the lifecycle). Falls back to a
+ * polyfill that explicitly removes listeners on first abort.
  *
- * Listener registration is `{ once: true }` — once any signal fires, we stop
- * listening on the others. The composite signal cannot be "un-aborted".
+ * # Listener safety
+ *
+ * The polyfill registers `{ once: true }` listeners on each input and
+ * manually removes the others when one fires. After settlement, the
+ * composite signal holds zero references to the inputs — they may be GC'd.
  */
 export declare function anySignal(signals: ReadonlyArray<AbortSignal>): AbortSignal;
 /**
@@ -16,12 +20,18 @@ export declare function anySignal(signals: ReadonlyArray<AbortSignal>): AbortSig
  * - If the signal aborts while the promise is pending, rejects with `signal.reason`.
  * - If the promise settles first, returns its value (or rejects with its error).
  *
- * The listener is registered with `{ once: true }` and never leaks: either
- * the signal fires (listener auto-removed) or the promise settles (the
- * signal will eventually be GC'd along with the listener).
+ * # Listener safety
  *
- * Used by `dedupePolicy` so joiners can cancel their own `await` even if the
- * originator's `fn` is still running.
+ * On success path, the abort listener is explicitly removed. A
+ * `{ once: true }` listener would stay attached on long-lived signals,
+ * leaking one closure per call.
+ *
+ * # Mark-as-handled
+ *
+ * When the signal aborts first, the original `promise` may still settle
+ * later (success or failure). We attach a no-op `.catch` to it so V8
+ * doesn't emit an `unhandledRejection` warning. The error is NOT
+ * swallowed from the caller — the caller already received `signal.reason`.
  */
 export declare function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T>;
 /**
@@ -31,9 +41,11 @@ export declare function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): 
  * signal aborts before the timer fires. If the signal is already aborted
  * when called, rejects synchronously (in microtask).
  *
- * Used by `retryPolicy` to make backoff delays interruptible: when an outer
- * `totalTimeout` fires mid-delay, the delay rejects immediately instead of
- * blocking the retry loop until the timer would have elapsed.
+ * # Timer hygiene
+ *
+ * The internal `setTimeout` is `unref`'d on Node so it doesn't keep the
+ * event loop alive solely for this sleep. On browsers there is no
+ * equivalent — the timer is short-lived enough not to matter.
  */
 export declare function sleep(ms: number, signal?: AbortSignal): Promise<void>;
 /**
@@ -45,11 +57,23 @@ export declare function sleep(ms: number, signal?: AbortSignal): Promise<void>;
 export declare function isAbortError(err: unknown): boolean;
 /**
  * Link a parent signal to a child controller: when the parent aborts, the
- * child is aborted with the same reason. No-op if the parent is already
- * aborted (the caller should check `parent.aborted` separately if it cares
- * about synchronous abort).
+ * child is aborted with the same reason.
  *
- * The listener is `{ once: true }` — no leak.
+ * # Contract
+ *
+ * Returns an `unlink()` function that removes the listener. Callers MUST
+ * call `unlink()` on success path — otherwise the listener stays attached
+ * to the parent forever, leaking one closure per call.
+ *
+ * If the parent is already aborted, the child is aborted synchronously
+ * and `unlink` is a no-op.
+ *
+ * # Prefer `anySignal()` instead
+ *
+ * For new code, prefer `anySignal([parent, timeoutSignal])` which uses
+ * the native Node 20+ implementation and handles cleanup automatically.
+ * This function exists for call sites that need an `AbortController`
+ * (not just a signal) — e.g. to layer additional abort sources.
  */
-export declare function linkSignal(parent: AbortSignal, child: AbortController): void;
+export declare function linkSignal(parent: AbortSignal, child: AbortController): () => void;
 //# sourceMappingURL=abort.d.ts.map

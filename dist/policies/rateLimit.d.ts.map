@@ -1,0 +1,1 @@
+{"version":3,"file":"rateLimit.d.ts","sourceRoot":"","sources":["../../src/policies/rateLimit.ts"],"names":[],"mappings":"AAAA,OAAO,KAAK,EAAS,aAAa,EAAiB,gBAAgB,EAAE,MAAM,mBAAmB,CAAA;AAmB9F,wBAAgB,eAAe,CAAC,CAAC,EAAE,IAAI,EAAE,gBAAgB,GAAG,aAAa,CAAC,CAAC,CAAC,CA6B3E"}

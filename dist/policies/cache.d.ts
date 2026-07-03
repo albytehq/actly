@@ -3,7 +3,22 @@ import type { CacheOptions, PolicyApplier } from '../types/index.js';
  * Short-circuit the entire downstream chain on a cache hit.
  * On a miss, run `fn` and store the result with TTL.
  *
- * # Single-flight (fixes cache stampede)
+ * # Properties
+ *
+ *  - **Single-flight originator isolation**: the stored in-flight promise is
+ *    the RAW `fn(signal)` — NOT raceAbort-wrapped. An originator's signal
+ *    abort no longer causes all cache-miss joiners to reject. Each caller
+ *    races against their OWN signal only.
+ *  - **Generation-safe inflight cleanup**: stale originators don't delete
+ *    newer entries (same pattern as dedupePolicy).
+ *  - **Signal-aware async store path**: between `await store.get()` and
+ *    `await store.set()`, we re-check `signal.aborted`. The previous
+ *    version would happily return a cached value even after the caller
+ *    aborted mid-Redis-latency.
+ *  - **Cache hit honours abort**: if `signal.aborted` is true at policy
+ *    entry, we reject immediately — consistent with `act()`'s contract.
+ *
+ * # Single-flight (cache stampede prevention)
  *
  * On a sync store, the policy also stores the in-flight Promise under a
  * separate `__inflight:cache:<key>` slot. Concurrent callers that miss the
@@ -26,9 +41,7 @@ import type { CacheOptions, PolicyApplier } from '../types/index.js';
  * # Cache hit semantics
  *
  * On a cache hit, `meta.source` is set to `'cache'` and `meta.attempts` is
- * set to `0` — no work was performed. (v1.1.0 reported `attempts: 1` on
- * cache hits, which was inconsistent with the documented meaning of
- * `attempts`. v1.1.5 fixes this.)
+ * set to `0` — no work was performed.
  *
  * Failures are NEVER cached. Only successful values are stored.
  */

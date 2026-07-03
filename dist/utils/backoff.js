@@ -30,11 +30,22 @@ export function computeDelay(attempt, opts) {
         delay = max;
     delay = Math.min(delay, max);
     // Step 3: jitter
+    // All jitter variants produce a delay in [0, delay].
+    // The `decorrelated` formula `base + random() * (delay - base)` assumes
+    // delay >= base, which can be violated when maxDelay caps below base.
+    // Fix: clamp the final result to [0, delay] to guarantee the cap holds.
     switch (opts.jitter ?? 'full') {
         case 'none': return delay;
         case 'full': return Math.random() * delay;
         case 'equal': return delay / 2 + Math.random() * delay / 2;
-        case 'decorrelated': return base + Math.random() * (delay - base);
+        case 'decorrelated': {
+            // If delay < base (maxDelay capped below base), decorrelated degrades
+            // to full jitter — the formula would otherwise produce values > delay.
+            const lo = Math.min(base, delay);
+            const hi = delay;
+            const result = lo + Math.random() * (hi - lo);
+            return Math.max(0, Math.min(result, delay));
+        }
         default: return delay;
     }
 }

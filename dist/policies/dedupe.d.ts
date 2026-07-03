@@ -2,34 +2,16 @@ import type { PolicyApplier, DedupeOptions } from '../types/index.js';
 /**
  * Collapse concurrent calls that share the same key into one in-flight Promise.
  *
- * # How it works
+ * # Properties
  *
- * The first caller (originator) starts the work and stores
- * `{ promise, meta }` in the store under `dedupe:<key>`. Every subsequent
- * caller that arrives before the promise settles receives the SAME promise
- * — no duplicate work.
- *
- * # Shared `meta` (fixes v1.0 trade-off)
- *
- * The originator's `ctx.meta` reference is stored alongside the promise.
- * Inner policies (e.g. `retryPolicy`) mutate it as they run. After the
- * promise settles, joiners copy `attempts` and `source` from the shared
- * meta into their own `ctx.meta`. This means a joiner's `ActResult.attempts`
- * reflects the real effort (e.g. `3` if the originator retried twice), not
- * the misleading default of `1`.
- *
- * # Abort safety (fixes hung-fn block)
- *
- * Joiners race the in-flight promise against their own AbortSignal via
- * `raceAbort`. If a joiner's signal aborts (e.g. their `totalTimeout`
- * fires), they reject immediately — they don't have to wait for the
- * originator to finish. The originator's promise continues in the
- * background for any other joiners that haven't aborted.
- *
- * If `inflightTtl` is set, the store entry is also TTL'd: if the
- * originator never settles, new callers can start fresh after the TTL
- * expires (the original promise still leaks unless an outer timeout
- * fires, but new callers aren't blocked).
+ *  - **Generation-safe cleanup**: stale originators never delete newer
+ *    entries when `inflightTtl` triggers replacement.
+ *  - **Joiner isolation**: originator's caller-signal abort does NOT
+ *    propagate to joiners. Each joiner races the shared in-flight promise
+ *    against their OWN signal only.
+ *  - **Truthful joiner attempts**: joiners that abort before the originator
+ *    settles report `attempts: 0` (they did no work), not the originator's
+ *    in-progress count.
  *
  * # INVARIANT: requires SyncStateStore
  *

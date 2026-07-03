@@ -1,0 +1,1 @@
+{"version":3,"file":"bulkhead.d.ts","sourceRoot":"","sources":["../../src/policies/bulkhead.ts"],"names":[],"mappings":"AAAA,OAAO,KAAK,EAAS,aAAa,EAAiB,eAAe,EAAE,MAAM,mBAAmB,CAAA;AA0B7F,wBAAgB,cAAc,CAAC,CAAC,EAAE,IAAI,EAAE,eAAe,GAAG,aAAa,CAAC,CAAC,CAAC,CA0FzE"}

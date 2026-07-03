@@ -42,6 +42,13 @@ export interface ActSuccess<T> {
      * - Dedupe joiner: mirrors the originator's attempt count
      */
     attempts: number;
+    /**
+     * Trace ID for correlation across logs/metrics. Present when
+     * `options.observability` or `options.traceId` is set; `undefined` otherwise.
+     */
+    traceId?: string;
+    /** Wall-clock duration of this act() call in ms. */
+    durationMs?: number;
 }
 export interface ActFailure {
     ok: false;
@@ -51,6 +58,13 @@ export interface ActFailure {
      * For dedupe joiners: mirrors the originator's attempt count.
      */
     attempts: number;
+    /**
+     * Trace ID for correlation across logs/metrics. Present when
+     * `options.observability` or `options.traceId` is set; `undefined` otherwise.
+     */
+    traceId?: string;
+    /** Wall-clock duration of this act() call in ms. */
+    durationMs?: number;
 }
 export type ActResult<T> = ActSuccess<T> | ActFailure;
 export interface RetryOptions {
@@ -151,7 +165,7 @@ export interface CacheOptions {
     /** Keep a successful result for this many milliseconds. Must be > 0. */
     ttl: number;
 }
-export interface ActOptions {
+export interface ActOptions<T = unknown> {
     retry?: RetryOptions;
     /** Per-attempt deadline. Each retry gets a fresh clock. */
     timeout?: TimeoutOptions;
@@ -188,6 +202,86 @@ export interface ActOptions {
      * over cancellation from outside `act()`.
      */
     signal?: AbortSignal;
+    /**
+     * Observability hooks. All optional. When omitted entirely (the
+     * common case), zero overhead is incurred on the hot path — no event
+     * objects are allocated, no function calls are made.
+     *
+     * When hooks ARE registered, events are allocated lazily — only when
+     * the corresponding event actually fires.
+     *
+     * @example
+     * ```ts
+     * await act('user:42', fn, {
+     *   retry: { attempts: 3 },
+     *   observability: {
+     *     onAttempt: (e) => metrics.increment('act.attempt', { key: e.key, attempt: e.attempt }),
+     *     onFinalFailure: (e) => logger.error({ key: e.key, traceId: e.traceId, failedBy: e.failedBy }, 'act failed'),
+     *     onFinalSuccess: (e) => metrics.histogram('act.duration', e.durationMs),
+     *   },
+     * })
+     * ```
+     */
+    observability?: ObservabilityHooks;
+    /**
+     * Trace ID for logs/metrics correlation. Auto-generated via crypto.randomUUID()
+     * when omitted. Appears on every observability event and on ActResult.traceId.
+     */
+    traceId?: string;
+    /** Circuit breaker: trips open after N consecutive failures, blocks calls for a cooldown period. */
+    circuitBreaker?: CircuitBreakerOptions;
+    /** Bulkhead: limits concurrent in-flight calls per key. Excess callers queue or fail fast. */
+    bulkhead?: BulkheadOptions;
+    /** Rate limiter: limits calls per window per key. Excess callers fail with RateLimitError. */
+    rateLimit?: RateLimitOptions;
+    /** Hedge: sends a second fn call after delayMs if the first hasn't settled. Races them. */
+    hedge?: HedgeOptions;
+    /** Fallback: returns this value if all policies fail. Suppresses ActFailure. */
+    fallback?: FallbackOptions<T>;
+    /** Audit: logs every act() call with key, traceId, result, timestamp. */
+    audit?: AuditOptions;
+}
+export interface CircuitBreakerOptions {
+    /** Number of consecutive failures before the breaker opens. Must be >= 1. */
+    threshold: number;
+    /** How long to stay open before transitioning to half-open (ms). Must be > 0. */
+    cooldownMs: number;
+    /** Optional: reset failure count after this idle period (ms). Default: Infinity. */
+    resetTimeoutMs?: number;
+}
+export interface BulkheadOptions {
+    /** Max concurrent in-flight calls per key. Must be >= 1. */
+    maxConcurrent: number;
+    /** How long to queue before rejecting with BulkheadOverflowError (ms). Default: 0 (fail fast). */
+    queueTimeoutMs?: number;
+}
+export interface RateLimitOptions {
+    /** Max calls per window per key. Must be >= 1. */
+    maxCalls: number;
+    /** Window size in ms. Must be > 0. */
+    windowMs: number;
+}
+export interface HedgeOptions {
+    /** Delay before sending the second (hedge) call (ms). Must be > 0. */
+    delayMs: number;
+}
+export interface FallbackOptions<T> {
+    /** Value to return if all retries/policies fail. */
+    value: T | (() => T | Promise<T>);
+}
+export interface AuditOptions {
+    /** Called with audit entry after every act() call (success or failure). */
+    log: (entry: AuditEntry) => void;
+}
+export interface AuditEntry {
+    key: string;
+    traceId: string;
+    timestamp: number;
+    durationMs: number;
+    ok: boolean;
+    attempts: number;
+    failedBy?: string;
+    error?: unknown;
 }
 /**
  * Mutable bag mutated in-place during execution.
@@ -201,11 +295,90 @@ export interface RunMeta {
     attempts: number;
     source: ActSource;
 }
+export interface ObservabilityContext {
+    traceId: string;
+    hooks: ObservabilityHooks;
+    joinerCounter: number;
+}
+/** User-supplied observability hooks. See `observability.ts` for full shape. */
+export interface ObservabilityHooks {
+    onAttempt?: (event: {
+        readonly type: 'attempt';
+        readonly key: string;
+        readonly traceId: string;
+        readonly timestamp: number;
+        readonly attempt: number;
+        readonly durationMs?: number;
+        readonly error?: unknown;
+    }) => void;
+    onRetry?: (event: {
+        readonly type: 'retry';
+        readonly key: string;
+        readonly traceId: string;
+        readonly timestamp: number;
+        readonly attempt: number;
+        readonly delayMs: number;
+        readonly error: unknown;
+    }) => void;
+    onCacheHit?: (event: {
+        readonly type: 'cache-hit';
+        readonly key: string;
+        readonly traceId: string;
+        readonly timestamp: number;
+        readonly ageMs: number;
+    }) => void;
+    onCacheMiss?: (event: {
+        readonly type: 'cache-miss';
+        readonly key: string;
+        readonly traceId: string;
+        readonly timestamp: number;
+    }) => void;
+    onDedupeJoin?: (event: {
+        readonly type: 'dedupe-join';
+        readonly key: string;
+        readonly traceId: string;
+        readonly timestamp: number;
+        readonly joinerPosition: number;
+    }) => void;
+    onTimeout?: (event: {
+        readonly type: 'timeout';
+        readonly key: string;
+        readonly traceId: string;
+        readonly timestamp: number;
+        readonly kind: 'per-attempt' | 'total';
+        readonly ms: number;
+    }) => void;
+    onFinalSuccess?: (event: {
+        readonly type: 'final-success';
+        readonly key: string;
+        readonly traceId: string;
+        readonly timestamp: number;
+        readonly source: ActSource;
+        readonly attempts: number;
+        readonly durationMs: number;
+    }) => void;
+    onFinalFailure?: (event: {
+        readonly type: 'final-failure';
+        readonly key: string;
+        readonly traceId: string;
+        readonly timestamp: number;
+        readonly attempts: number;
+        readonly durationMs: number;
+        readonly failedBy: 'abort' | 'timeout' | 'total-timeout' | 'retry-exhausted' | 'fn-error' | 'validation';
+        readonly error: unknown;
+    }) => void;
+}
 /** Everything a policy receives about the current run. */
 export interface PolicyContext {
     key: string;
     store: AnyStateStore;
     meta: RunMeta;
+    /**
+     * Observability context. Present only when the caller supplied
+     * `options.observability` hooks. Policies check `ctx.observability != null`
+     * before allocating event objects — no overhead when absent.
+     */
+    observability?: ObservabilityContext;
 }
 /**
  * The ONLY shape the executor knows about policies.
@@ -218,9 +391,9 @@ export type PolicyApplier<T> = (fn: ActFn<T>, ctx: PolicyContext) => ActFn<T>;
 import type { SyncStateStore, AsyncStateStore } from '../stores/base.js';
 export type { SyncStateStore, AsyncStateStore };
 /**
- * Public store type. v1.1+: alias for `SyncStateStore`.
+ * Public store type. Alias for `SyncStateStore` (backwards compat).
  *
- * Kept for backwards compatibility — every v1.0 consumer typed against
+ * Kept for backwards compatibility — consumers typed against
  * `StateStore` continues to compile without changes. A future major version
  * may widen this to `SyncStateStore | AsyncStateStore`.
  */

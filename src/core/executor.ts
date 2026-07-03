@@ -4,6 +4,7 @@ import type {
   PolicyContext,
   AnyStateStore,
   RunMeta,
+  ObservabilityContext,
 } from '../types/index.js'
 import { isSyncStore } from '../stores/base.js'
 
@@ -40,6 +41,11 @@ export interface ExecutorInput<T> {
    * inward.
    */
   signal:   AbortSignal
+  /**
+   * Observability context. When present, policies emit events
+   * via the hooks. When absent (the common case), zero overhead.
+   */
+  observability?: ObservabilityContext
 }
 
 /**
@@ -75,6 +81,8 @@ export async function execute<T>(input: ExecutorInput<T>): Promise<T> {
     key:   input.key,
     store: input.store,
     meta:  input.meta,
+    // Thread observability through. Policies read this lazily.
+    observability: input.observability,
   }
 
   // Build the call chain from inside out.

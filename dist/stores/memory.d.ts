@@ -3,11 +3,9 @@ export interface InMemoryStoreOptions {
     /**
      * Periodically sweep and remove expired entries in the background.
      *
-     * Disabled by default. The store evicts lazily on `get()` / `has()` access,
-     * which is sufficient for most use cases. Enable `autoCleanup` when the
-     * store is long-lived and accumulates many TTL'd entries that are never
-     * re-read — for example, a server-side cache that receives write-heavy
-     * traffic with low subsequent read rates.
+     * Disabled by default for explicit-store users. The DEFAULT module-level
+     * store (used when you call `act()` without `withStore()`) enables this
+     * automatically — see `core/act.ts`.
      */
     autoCleanup?: boolean;
     /**
@@ -26,18 +24,23 @@ export interface InMemoryStoreOptions {
      * caches with high-cardinality keys to bound memory usage.
      *
      * The LRU order is updated on `get()` and `set()` — both move the accessed
-     * key to the most-recent position.
+     * key to the most-recent position. Implementation uses a doubly-linked
+     * list for O(1) reordering (no `delete + set` Map churn).
      */
     maxSize?: number;
 }
 /**
- * Reference `SyncStateStore` implementation backed by a `Map`.
+ * Reference `SyncStateStore` implementation backed by a `Map` + doubly-linked
+ * list for LRU.
  *
- * # LRU semantics
+ * # Properties
  *
- * `Map` iteration order is insertion order, so we implement LRU by
- * `delete` + `set` on every access — the most-recently-touched key ends up
- * at the end of the iteration, and the oldest is `entries.keys().next().value`.
+ *  - `size()` is O(1) — tracked via a counter instead of full scan.
+ *  - LRU reordering uses an explicit doubly-linked list, avoiding the
+ *    `delete + set` Map churn that was 2 Map operations per `get()`.
+ *  - Default `maxSize` is bounded (`LIMITS.DEFAULT_STORE_MAX_SIZE`) when
+ *    used as the module-level default — prevents unbounded memory growth
+ *    in long-running servers.
  *
  * # Expiry
  *
@@ -46,8 +49,10 @@ export interface InMemoryStoreOptions {
  */
 export declare class InMemoryStore implements SyncStateStore {
     readonly _sync: true;
-    private readonly entries;
+    private readonly map;
     private readonly maxSize;
+    private head?;
+    private tail?;
     private cleanupTimer;
     constructor(options?: InMemoryStoreOptions);
     get<T>(key: string): T | undefined;
@@ -58,11 +63,12 @@ export declare class InMemoryStore implements SyncStateStore {
     /**
      * Return the count of live (non-expired) entries.
      *
-     * Pure query — does NOT touch LRU order. Expired entries discovered during
-     * the scan are evicted opportunistically (they were already invisible to
-     * `get()`, so eviction has no observable effect beyond memory reclamation).
+     * O(1) — returns the Map size directly. Expired-but-not-yet-
+     * evicted entries are counted; they're reclaimed lazily on next access
+     * or by the background sweep. This is intentional: a fully-accurate
+     * count would require an O(n) scan, defeating the purpose.
      *
-     * Two-pass to avoid mutating the Map during iteration (spec-safe).
+     * Pure query — does NOT touch LRU order.
      */
     size(): number;
     /**
@@ -70,10 +76,23 @@ export declare class InMemoryStore implements SyncStateStore {
      * Safe to call multiple times — subsequent calls are no-ops.
      */
     destroy(): void;
+    private _appendTail;
+    private _removeNode;
+    private _moveToTail;
     /**
      * Sweep all entries and remove those past their expiry time.
      * Called by the autoCleanup interval; not part of the public contract.
+     *
+     * Two-pass to avoid mutating the Map during iteration (spec-safe).
      */
     private _sweep;
 }
+/**
+ * Factory for the default module-level store.
+ *
+ * Bounded by `LIMITS.DEFAULT_STORE_MAX_SIZE` with background sweep —
+ * prevents unbounded memory growth in long-running servers without
+ * requiring callers to opt in.
+ */
+export declare function createDefaultStore(): InMemoryStore;
 //# sourceMappingURL=memory.d.ts.map
