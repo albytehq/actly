@@ -1,122 +1,156 @@
 import { computeDelay } from '../utils/backoff.js';
 import { isAbortError, sleep } from '../utils/abort.js';
+import { safeCall } from '../utils/safeCall.js';
 import { RetryExhaustedError } from '../errors.js';
-// ─── Default predicate ────────────────────────────────────────────────────────
-/**
- * Default `shouldRetry`: retry on any error EXCEPT abort errors.
- *
- * Abort errors indicate the caller or a timeout cancelled the operation —
- * retrying would just abort again on the next attempt, wasting delay budget.
- *
- * User-supplied `shouldRetry` overrides this entirely.
- */
+import { LIMITS } from '../utils/limits.js';
 function defaultShouldRetry(error, _attempt) {
-    return !isAbortError(error);
+    if (isAbortError(error))
+        return false;
+    if (typeof error === 'object' && error !== null) {
+        const code = error.code;
+        if (code === 'ACTLY_TIMEOUT' || code === 'ACTLY_TOTAL_TIMEOUT')
+            return false;
+    }
+    return true;
 }
-// ─── Policy ───────────────────────────────────────────────────────────────────
-/**
- * Retry `fn` up to `opts.attempts` times on retryable errors.
- *
- * Writes the live attempt count into `ctx.meta.attempts` so `act()` can
- * report it in the final `ActResult`.
- *
- * # Signal awareness
- *
- * - Before each attempt, checks `parentSignal.aborted`. If the parent (e.g.
- *   `totalTimeout` or caller) has aborted, throws the parent's reason
- *   immediately — no more attempts.
- * - Sleeps between attempts use `sleep(delay, parentSignal)`. If the parent
- *   aborts mid-delay, the sleep rejects immediately instead of blocking
- *   the loop until the timer would have elapsed.
- *
- * # `shouldRetry` invocation
- *
- * Called after EVERY failure, including the last attempt. This preserves the
- * predicate's contract for observers / metrics that rely on it being called
- * per-attempt. The return value is only consulted when `attempt < max`.
- *
- * # Default predicate
- *
- * If `shouldRetry` is omitted, uses `defaultShouldRetry` which retries on
- * every error EXCEPT abort errors (so timeouts and caller cancellations
- * don't waste retry budget).
- */
 export function retryPolicy(opts) {
     const max = Math.max(1, Math.floor(opts.attempts));
     const shouldRetry = opts.shouldRetry ?? defaultShouldRetry;
+    const shouldRetryResult = opts.shouldRetryResult;
+    const dangerouslyUnref = opts.dangerouslyUnref === true;
+    const sleepOpts = dangerouslyUnref ? { unref: true } : undefined;
+    const backoffFn = opts.backoffFn;
     return (fn, ctx) => async (parentSignal) => {
-        const errors = [];
-        let lastErr;
+        const backoffState = {};
+        let errors;
         let retriedAtLeastOnce = false;
         const obs = ctx.observability;
         for (let attempt = 1; attempt <= max; attempt++) {
-            // Parent (totalTimeout or caller signal) already aborted — bail.
             if (parentSignal.aborted)
                 throw parentSignal.reason;
             ctx.meta.attempts = attempt;
             const attemptStart = Date.now();
             try {
-                // Emit onAttempt before each attempt. (We could emit
-                // after with duration/error, but before lets observers track
-                // in-flight attempts in real time.)
                 if (obs) {
-                    obs.hooks.onAttempt?.({
+                    safeCall(obs.hooks.onAttempt, {
                         type: 'attempt', key: ctx.key, traceId: obs.traceId,
                         timestamp: attemptStart, attempt,
                     });
                 }
-                return await fn(parentSignal);
+                const value = await fn(parentSignal);
+                if (shouldRetryResult) {
+                    let accept;
+                    try {
+                        const raw = shouldRetryResult(value, attempt);
+                        accept = typeof raw === 'boolean' ? raw : true;
+                    }
+                    catch {
+                        return value;
+                    }
+                    if (accept)
+                        return value;
+                    const syntheticError = new Error(`Actly: shouldRetryResult returned false on attempt ${attempt}`);
+                    if (errors === undefined)
+                        errors = [];
+                    if (errors.length < 10) {
+                        errors.push(syntheticError);
+                    }
+                    else {
+                        errors.shift();
+                        errors.push(syntheticError);
+                    }
+                    if (attempt >= max) {
+                        if (obs) {
+                            safeCall(obs.hooks.onRetry, {
+                                type: 'retry', key: ctx.key, traceId: obs.traceId,
+                                timestamp: Date.now(), attempt, delayMs: 0,
+                                error: syntheticError,
+                            });
+                        }
+                        return value;
+                    }
+                    retriedAtLeastOnce = true;
+                    if (parentSignal.aborted)
+                        throw parentSignal.reason;
+                    let rawDelay;
+                    try {
+                        rawDelay = backoffFn
+                            ? backoffFn(attempt, syntheticError, backoffState)
+                            : computeDelay(attempt, opts);
+                    }
+                    catch {
+                        rawDelay = computeDelay(attempt, opts);
+                    }
+                    const safeDelay = Number.isFinite(rawDelay) ? rawDelay : 0;
+                    const delay = Math.min(Math.max(0, safeDelay), LIMITS.MAX_RETRY_DELAY_MS);
+                    if (obs) {
+                        safeCall(obs.hooks.onRetry, {
+                            type: 'retry', key: ctx.key, traceId: obs.traceId,
+                            timestamp: Date.now(), attempt, delayMs: delay,
+                            error: syntheticError,
+                        });
+                    }
+                    if (delay > 0)
+                        await sleep(delay, parentSignal, sleepOpts);
+                    continue;
+                }
+                return value;
             }
             catch (err) {
-                lastErr = err;
-                errors.push(err);
-                // Invoke shouldRetry. If the predicate throws, treat as "don't retry"
-                // and surface the original fn error (not the predicate error).
+                if (errors === undefined)
+                    errors = [];
+                if (errors.length < 10) {
+                    errors.push(err);
+                }
+                else {
+                    errors.shift();
+                    errors.push(err);
+                }
                 let retryable;
                 try {
                     retryable = shouldRetry(err, attempt);
                 }
                 catch {
-                    // Predicate threw — don't retry, surface original error
                     throw err;
                 }
                 if (attempt >= max) {
-                    // Last attempt. If we retried at least once (predicate
-                    // allowed retries), wrap in RetryExhaustedError for context.
                     if (retriedAtLeastOnce) {
                         throw new RetryExhaustedError({
                             key: ctx.key,
                             attempts: attempt,
                             lastError: err,
-                            errors,
+                            errors: errors ?? [],
                         });
                     }
                     throw err;
                 }
-                if (!retryable) {
-                    // Non-retryable error — bail immediately.
+                if (!retryable)
                     throw err;
-                }
-                // Mark that we retried at least once — affects final wrap.
                 retriedAtLeastOnce = true;
-                // Parent aborted mid-attempt — don't sleep, bail.
                 if (parentSignal.aborted)
                     throw parentSignal.reason;
-                const delay = computeDelay(attempt, opts);
-                // Emit onRetry before the delay sleep.
+                let rawDelay;
+                try {
+                    rawDelay = backoffFn
+                        ? backoffFn(attempt, err, backoffState)
+                        : computeDelay(attempt, opts);
+                }
+                catch {
+                    rawDelay = computeDelay(attempt, opts);
+                }
+                const safeDelay = Number.isFinite(rawDelay) ? rawDelay : 0;
+                const delay = Math.min(Math.max(0, safeDelay), LIMITS.MAX_RETRY_DELAY_MS);
                 if (obs) {
-                    obs.hooks.onRetry?.({
+                    safeCall(obs.hooks.onRetry, {
                         type: 'retry', key: ctx.key, traceId: obs.traceId,
                         timestamp: Date.now(), attempt, delayMs: delay, error: err,
                     });
                 }
                 if (delay > 0) {
-                    await sleep(delay, parentSignal);
+                    await sleep(delay, parentSignal, sleepOpts);
                 }
             }
         }
-        // Unreachable: the loop either returns or throws on every iteration.
-        throw lastErr;
+        throw new Error('Actly: retryPolicy reached unreachable state');
     };
 }
-//# sourceMappingURL=retry.js.map

@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.bulkheadPolicy = bulkheadPolicy;
 const executor_js_1 = require("../core/executor.js");
 const errors_js_1 = require("../errors.js");
+const safeCall_js_1 = require("../utils/safeCall.js");
 const NS = 'bulk:';
 function getState(store, key) {
     return store.get(NS + key) ?? { active: 0, queue: [] };
@@ -13,12 +14,12 @@ function setState(store, key, state) {
 function bulkheadPolicy(opts) {
     const maxConcurrent = Math.max(1, Math.floor(opts.maxConcurrent));
     const queueTimeoutMs = opts.queueTimeoutMs ?? 0;
+    const maxQueueSize = opts.maxQueueSize ?? Number.POSITIVE_INFINITY;
     const applier = (fn, ctx) => {
         const syncCtx = ctx;
         return async (signal) => {
             const key = syncCtx.key;
             const acquireSlot = () => {
-                // If signal already aborted, reject immediately
                 if (signal.aborted)
                     return Promise.reject(signal.reason);
                 const state = getState(syncCtx.store, key);
@@ -30,14 +31,19 @@ function bulkheadPolicy(opts) {
                 if (queueTimeoutMs === 0) {
                     throw new errors_js_1.BulkheadOverflowError(key, maxConcurrent);
                 }
+                const currentState = getState(syncCtx.store, key);
+                if (currentState.queue.length >= maxQueueSize) {
+                    throw new errors_js_1.BulkheadOverflowError(key, maxConcurrent);
+                }
                 return new Promise((resolve, reject) => {
                     const state2 = getState(syncCtx.store, key);
                     const entry = {
                         resolve,
                         reject,
+                        timer: undefined,
+                        onAbort: undefined,
                         signal,
                     };
-                    // Remove entry from queue on signal abort
                     entry.onAbort = () => {
                         const s = getState(syncCtx.store, key);
                         const idx = s.queue.indexOf(entry);
@@ -62,6 +68,30 @@ function bulkheadPolicy(opts) {
                     }
                     signal.addEventListener('abort', entry.onAbort, { once: true });
                     state2.queue.push(entry);
+                    const obs = syncCtx.observability;
+                    if (obs && maxQueueSize !== Number.POSITIVE_INFINITY) {
+                        const utilization = state2.queue.length / maxQueueSize;
+                        const wasOver80 = state2.backpressureEmitted === true;
+                        if (utilization >= 0.8 && !wasOver80) {
+                            ;
+                            state2.backpressureEmitted = true;
+                            (0, safeCall_js_1.safeCall)(obs.hooks.onBackpressure, {
+                                type: 'backpressure',
+                                key: syncCtx.key,
+                                traceId: obs.traceId,
+                                timestamp: Date.now(),
+                                source: 'bulkhead',
+                                queueLength: state2.queue.length,
+                                maxConcurrent,
+                                maxQueueSize,
+                                utilization,
+                            });
+                        }
+                        else if (utilization < 0.8 && wasOver80) {
+                            ;
+                            state2.backpressureEmitted = false;
+                        }
+                    }
                     setState(syncCtx.store, key, state2);
                 });
             };
@@ -73,7 +103,6 @@ function bulkheadPolicy(opts) {
                     state.active++;
                     if (next.timer)
                         clearTimeout(next.timer);
-                    // Remove abort listener from the QUEUED caller's signal (not releaser's)
                     if (next.onAbort && next.signal) {
                         next.signal.removeEventListener('abort', next.onAbort);
                     }
@@ -81,7 +110,18 @@ function bulkheadPolicy(opts) {
                 }
                 if (state.active < 0)
                     state.active = 0;
-                setState(syncCtx.store, key, state);
+                if (maxQueueSize !== Number.POSITIVE_INFINITY && state.backpressureEmitted === true) {
+                    if (state.queue.length / maxQueueSize < 0.8) {
+                        ;
+                        state.backpressureEmitted = false;
+                    }
+                }
+                if (state.active === 0 && state.queue.length === 0) {
+                    syncCtx.store.delete(NS + key);
+                }
+                else {
+                    setState(syncCtx.store, key, state);
+                }
             };
             await acquireSlot();
             try {

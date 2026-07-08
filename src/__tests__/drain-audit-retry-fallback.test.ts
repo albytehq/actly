@@ -7,33 +7,24 @@ const wait = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
 
 describe('BUG-D40: drain resolver leak on timeout', () => {
   it('timed-out drain resolvers are removed from array', async () => {
-    // Start an in-flight call that never resolves
+    // in-flight call that never resolves on its own
     let resolveFn!: () => void
     const fnPromise = new Promise<void>(r => { resolveFn = r })
     const actPromise = act('d40-drain-leak:test', () => fnPromise)
 
     await wait(10)
 
-    // Call drain with short timeout — will time out
+    // short timeout forces the drain resolver to time out
     await drain(30)
 
-    // The resolver should be removed from the internal array after timeout.
-    // We can't directly inspect the array, but we can verify that calling
-    // drain again doesn't accumulate stale resolvers.
-    //
-    // If resolvers leak, each drain() call adds a resolver that holds
-    // closures. Over time in a long-running process with constant load,
-    // this causes memory growth.
-    //
-    // We test by calling drain multiple times and verifying no error.
+    // the resolver array isn't exposed, so verify indirectly: repeated
+    // drain() calls must not accumulate stale resolvers. Each leaked
+    // resolver pins closures, and under steady load that becomes memory
+    // growth in long-running processes.
     await drain(20)
     await drain(20)
     await drain(20)
 
-    // All drain calls should return false (still in-flight)
-    // The key assertion: no accumulation causes issues
-
-    // Clean up
     resolveFn()
     await actPromise
     expect(true).toBe(true)
@@ -86,11 +77,9 @@ describe('BUG-D42: shouldRetry throw masks original error', () => {
     })
 
     expect(r.ok).toBe(false)
-    // After fix: should surface the original fn error, not the predicate error.
-    // Or at minimum, wrap the predicate error with context.
-    // Before fix: r.error === predicateError (confusing — caller expects fn errors)
+    // the fn's error must stay accessible; a buggy predicate shouldn't
+    // replace it with its own throw
     if (!r.ok) {
-      // The original error should be accessible, not lost behind predicate throw
       expect(r.error).not.toBe(predicateError)
     }
   })
@@ -104,7 +93,7 @@ describe('BUG-D43: fallback masks errors from health check', () => {
     const scopedAct = withStore(store)
     const health = createHealthCheck(store)
 
-    // Call with fallback — fn fails, fallback succeeds
+    // fn fails, fallback returns a value
     await scopedAct('d43-fallback-health:test', async () => {
       throw new Error('downstream-failed')
     }, {
@@ -112,9 +101,8 @@ describe('BUG-D43: fallback masks errors from health check', () => {
     })
 
     const status = health()
-    // After fix: health check should record the error even though fallback
-    // returned a success result. Without this, monitoring can't detect
-    // that downstream is failing — callers silently fall back.
+    // health must still record the failure so monitoring can catch a
+    // downstream that's quietly degrading behind fallbacks
     expect(status.lastError).toBeDefined()
     expect(status.lastError!.message).toContain('downstream-failed')
     store.destroy()

@@ -6,47 +6,55 @@ const limits_js_1 = require("../utils/limits.js");
 function isUnrefable(t) {
     return typeof t.unref === 'function';
 }
-// ─── Implementation ───────────────────────────────────────────────────────────
-/**
- * Reference `SyncStateStore` implementation backed by a `Map` + doubly-linked
- * list for LRU.
- *
- * # Properties
- *
- *  - `size()` is O(1) — tracked via a counter instead of full scan.
- *  - LRU reordering uses an explicit doubly-linked list, avoiding the
- *    `delete + set` Map churn that was 2 Map operations per `get()`.
- *  - Default `maxSize` is bounded (`LIMITS.DEFAULT_STORE_MAX_SIZE`) when
- *    used as the module-level default — prevents unbounded memory growth
- *    in long-running servers.
- *
- * # Expiry
- *
- * Lazy on `get()` / `has()`: expired entries are deleted when touched.
- * Background sweep (optional) reclaims entries that are never re-read.
- */
 class InMemoryStore {
     _sync = true;
+    static finalizer;
+    static {
+        if (typeof FinalizationRegistry === 'function') {
+            InMemoryStore.finalizer = new FinalizationRegistry((timer) => {
+                try {
+                    clearInterval(timer);
+                }
+                catch { }
+            });
+        }
+    }
     map = new Map();
     maxSize;
-    head; // least recently used
-    tail; // most recently used
+    head;
+    tail;
     cleanupTimer;
+    memoryListener;
     constructor(options = {}) {
-        const { autoCleanup = false, cleanupIntervalMs = 30_000, maxSize = Number.POSITIVE_INFINITY, } = options;
+        const { autoCleanup = false, cleanupIntervalMs = 30_000, maxSize = limits_js_1.LIMITS.DEFAULT_STORE_MAX_SIZE, memoryPressureCleanup = false, } = options;
         if (!Number.isFinite(maxSize) || maxSize <= 0) {
-            // Infinity is allowed (unbounded); any other non-positive finite value
-            // is a programmer error.
             if (maxSize !== Number.POSITIVE_INFINITY) {
                 throw new RangeError(`Actly: InMemoryStore maxSize must be a positive finite number or Infinity, got ${maxSize}`);
             }
         }
+        if (maxSize !== Number.POSITIVE_INFINITY && !Number.isInteger(maxSize)) {
+            throw new RangeError(`Actly: InMemoryStore maxSize must be a positive integer or Infinity, got ${maxSize}`);
+        }
         this.maxSize = maxSize;
         if (autoCleanup) {
-            const timer = setInterval(() => this._sweep(), cleanupIntervalMs);
+            const timer = setInterval(() => this.sweep(), cleanupIntervalMs);
             if (isUnrefable(timer))
                 timer.unref();
             this.cleanupTimer = timer;
+            InMemoryStore.finalizer?.register(this, timer, this);
+        }
+        if (memoryPressureCleanup) {
+            const processOn = process.on;
+            if (typeof processOn === 'function') {
+                const memoryListener = () => {
+                    try {
+                        this.sweep();
+                    }
+                    catch { }
+                };
+                processOn.call(process, 'memory', memoryListener);
+                this.memoryListener = memoryListener;
+            }
         }
     }
     get(key) {
@@ -54,55 +62,50 @@ class InMemoryStore {
         if (!node)
             return undefined;
         if (node.expiresAt !== null && Date.now() > node.expiresAt) {
-            this._removeNode(node);
+            this.removeNode(node);
             this.map.delete(key);
             return undefined;
         }
-        // LRU refresh: move to tail (most-recent).
-        this._moveToTail(node);
+        this.moveToTail(node);
         return node.value;
     }
     set(key, value, ttlMs) {
         const existing = this.map.get(key);
         const now = Date.now();
         if (existing) {
-            // Update in place — don't grow size, don't evict.
             existing.value = value;
-            existing.expiresAt = ttlMs != null && ttlMs > 0 ? now + ttlMs : null;
+            existing.expiresAt = ttlMs != null && Number.isFinite(ttlMs) && ttlMs > 0 ? now + ttlMs : null;
             existing.insertedAt = now;
-            this._moveToTail(existing);
+            this.moveToTail(existing);
             return;
         }
-        // New key — evict if at capacity.
         while (this.map.size >= this.maxSize && this.head) {
             const evict = this.head;
-            this._removeNode(evict);
+            this.removeNode(evict);
             this.map.delete(evict.key);
         }
         const node = {
             key,
             value,
-            expiresAt: ttlMs != null && ttlMs > 0 ? now + ttlMs : null,
+            expiresAt: ttlMs != null && Number.isFinite(ttlMs) && ttlMs > 0 ? now + ttlMs : null,
             insertedAt: now,
         };
         this.map.set(key, node);
-        this._appendTail(node);
+        this.appendTail(node);
     }
     delete(key) {
         const node = this.map.get(key);
         if (!node)
             return;
-        this._removeNode(node);
+        this.removeNode(node);
         this.map.delete(key);
     }
     has(key) {
-        // Inline the expiry check to avoid the LRU side-effect of get().
-        // `has()` should be a pure query, not a touch.
         const node = this.map.get(key);
         if (!node)
             return false;
         if (node.expiresAt !== null && Date.now() > node.expiresAt) {
-            this._removeNode(node);
+            this.removeNode(node);
             this.map.delete(key);
             return false;
         }
@@ -113,45 +116,38 @@ class InMemoryStore {
         this.head = undefined;
         this.tail = undefined;
     }
-    /**
-     * Return the count of live (non-expired) entries.
-     *
-     * O(1) — returns the Map size directly. Expired-but-not-yet-
-     * evicted entries are counted; they're reclaimed lazily on next access
-     * or by the background sweep. This is intentional: a fully-accurate
-     * count would require an O(n) scan, defeating the purpose.
-     *
-     * Pure query — does NOT touch LRU order.
-     */
     size() {
         return this.map.size;
     }
-    /**
-     * Stop the background cleanup timer and release internal state.
-     * Safe to call multiple times — subsequent calls are no-ops.
-     */
     destroy() {
         if (this.cleanupTimer !== undefined) {
             clearInterval(this.cleanupTimer);
             this.cleanupTimer = undefined;
+            InMemoryStore.finalizer?.unregister(this);
         }
+        if (this.memoryListener) {
+            const processOff = process.off;
+            if (typeof processOff === 'function') {
+                processOff.call(process, 'memory', this.memoryListener);
+            }
+            this.memoryListener = undefined;
+        }
+        this.map.clear();
+        this.head = undefined;
+        this.tail = undefined;
     }
-    // ─── LRU list operations ──────────────────────────────────────────────────
-    //
-    // All operations are O(1). The list runs head (LRU) → tail (MRU).
-    _appendTail(node) {
+    appendTail(node) {
         if (this.tail) {
             this.tail.next = node;
             node.prev = this.tail;
             node.next = undefined;
         }
         else {
-            // Empty list — node is both head and tail.
             this.head = node;
         }
         this.tail = node;
     }
-    _removeNode(node) {
+    removeNode(node) {
         if (node.prev) {
             node.prev.next = node.next;
         }
@@ -167,43 +163,34 @@ class InMemoryStore {
         node.prev = undefined;
         node.next = undefined;
     }
-    _moveToTail(node) {
+    moveToTail(node) {
         if (this.tail === node)
-            return; // already MRU
-        this._removeNode(node);
-        this._appendTail(node);
+            return;
+        this.removeNode(node);
+        this.appendTail(node);
     }
-    /**
-     * Sweep all entries and remove those past their expiry time.
-     * Called by the autoCleanup interval; not part of the public contract.
-     *
-     * Two-pass to avoid mutating the Map during iteration (spec-safe).
-     */
-    _sweep() {
-        const now = Date.now();
-        const expired = [];
-        for (const [key, node] of this.map) {
-            if (node.expiresAt !== null && now > node.expiresAt) {
-                expired.push(key);
+    sweep() {
+        try {
+            const now = Date.now();
+            const expired = [];
+            for (const [key, node] of this.map) {
+                if (node.expiresAt !== null && now > node.expiresAt) {
+                    expired.push(key);
+                }
+            }
+            for (const key of expired) {
+                const node = this.map.get(key);
+                if (node) {
+                    this.removeNode(node);
+                    this.map.delete(key);
+                }
             }
         }
-        for (const key of expired) {
-            const node = this.map.get(key);
-            if (node) {
-                this._removeNode(node);
-                this.map.delete(key);
-            }
+        catch {
         }
     }
 }
 exports.InMemoryStore = InMemoryStore;
-/**
- * Factory for the default module-level store.
- *
- * Bounded by `LIMITS.DEFAULT_STORE_MAX_SIZE` with background sweep —
- * prevents unbounded memory growth in long-running servers without
- * requiring callers to opt in.
- */
 function createDefaultStore() {
     return new InMemoryStore({
         maxSize: limits_js_1.LIMITS.DEFAULT_STORE_MAX_SIZE,

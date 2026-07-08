@@ -7,15 +7,20 @@
     "types":                      ["node"],
     "strict":                     true,
     "noUncheckedIndexedAccess":   true,
+    "noUnusedLocals":             true,
+    "noUnusedParameters":         true,
+    "noImplicitReturns":          true,
+    "noFallthroughCasesInSwitch": true,
     "forceConsistentCasingInFileNames": true,
     "declaration":                true,
     "declarationMap":             true,
     "sourceMap":                  true,
+    "stripInternal":              true,
     "outDir":                     "dist",
     "rootDir":                    "src",
     "skipLibCheck":               true,
     "exactOptionalPropertyTypes": false
   },
   "include": ["src"],
-  "exclude": ["node_modules", "dist"]
+  "exclude": ["node_modules", "dist", "src/__tests__"]
 }

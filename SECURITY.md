@@ -1,65 +1,54 @@
 # Security Policy
 
-## Supported Versions
+## Supported versions
 
-| Version | Supported          |
-|---------|--------------------|
-| 1.2.x   | Security fixes only|
-| < 1.2   | Not supported      |
+| Version | Supported |
+|---|---|
+| 1.3.x | Yes |
+| 1.2.x | Security fixes only |
+| < 1.2 | No |
 
-## Reporting a Vulnerability
+## Reporting a vulnerability
 
-Report vulnerabilities privately.
+Report privately. Email albyte.inc@gmail.com. Do not open a public issue.
 
-- Email: albyte.inc@gmail.com
-- Do not open a public issue
 - Response within 48 hours
 - Fix or mitigation within 90 days
 
 Include in your report:
+
 - Description of the vulnerability
 - Steps to reproduce
 - Affected versions
 - Suggested fix (optional)
 
-## Disclosure Timeline
+## Disclosure timeline
 
-1. **Day 0**: Vulnerability reported
-2. **Day 2**: Acknowledgment sent
-3. **Day 7**: Triage complete, severity assigned
-4. **Day 30**: Fix in development
-5. **Day 60**: Fix in testing
-6. **Day 90**: Fix released, public disclosure
+- Day 0: vulnerability reported
+- Day 2: acknowledgment sent
+- Day 7: triage complete, severity assigned
+- Day 30: fix in development
+- Day 60: fix in testing
+- Day 90: fix released, public disclosure
 
 ## Scope
 
-### In Scope
-- Runtime vulnerabilities in `src/`
-- Input validation bypasses
-- Memory leaks or resource exhaustion
-- Race conditions
-- Supply chain issues in runtime dependencies
+**In scope**: runtime vulnerabilities in `src/`, input validation bypasses, memory leaks or resource exhaustion, race conditions, supply chain issues in runtime dependencies.
 
-### Out of Scope
-- DevDependency vulnerabilities (report to upstream)
-- Performance issues without security impact
-- Social engineering attacks
-- Physical security
+**Out of scope**: devDependency vulnerabilities (report to upstream), performance issues without security impact, social engineering, physical security.
 
-## Hardening Features
+## Built-in hardening
 
-The following security features are built in:
+- Key sanitisation: rejects prototype pollution, control chars, CRLF, oversized keys
+- Numeric input caps via `LIMITS`
+- Per-key rate limiter policy
+- Per-key bulkhead (concurrency limit)
+- Circuit breaker for cascading failure prevention
+- Error sanitisation: HTML entity escaping and control char stripping for audit logs
+- Per-tenant store isolation via `createTenantStore()`
+- Audit logging: every `act()` call logged with key, traceId, result, timestamp
 
-- **Key sanitization**: Rejects prototype pollution, control chars, CRLF, oversized keys
-- **Numeric input caps**: All numeric inputs bounded by `LIMITS`
-- **Rate limiting**: Per-key rate limiter policy
-- **Bulkhead**: Per-key concurrency limiting
-- **Circuit breaker**: Cascading failure prevention
-- **Error sanitization**: HTML entity escaping + control char stripping for audit logs
-- **Tenant isolation**: Per-tenant store management via `createTenantStore()`
-- **Audit logging**: Every `act()` call logged with key, traceId, result, timestamp
-
-## Dependency Policy
+## Dependency policy
 
 - Zero runtime dependencies
 - DevDependencies kept minimal (typescript, vitest, @types/node)

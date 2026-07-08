@@ -1,40 +1,26 @@
 /**
- * Observability hooks.
+ * Observability hooks for the `act()` lifecycle.
  *
- * Eight event types covering the entire lifecycle of an `act()` call.
+ * When `options.observability` is null/undefined the hot path is just a
+ * null-check per policy decision - no event objects, no calls. When hooks
+ * are registered, events are allocated lazily, only when they actually
+ * fire (a cache hit never allocates an `onRetry` event, for example).
  *
- * # Contract
- *
- * When `options.observability` is `null`/`undefined` (the common case),
- * no event objects are allocated and no function calls are made. The
- * hot path is a single null-check per policy decision.
- *
- * When hooks ARE registered, events are allocated lazily — only when the
- * corresponding event actually fires. A cache hit doesn't allocate an
- * `onRetry` event, for example.
- *
- * # Event shape
- *
- * Every event carries `key`, `traceId`, and `timestamp` for correlation.
- * Event-specific fields are on the same object (no nesting) for flat
- * destructuring in user code.
+ * Every event carries `key`, `traceId`, `timestamp` for correlation;
+ * event-specific fields sit on the same object so user code can destructure
+ * flat.
  *
  * # Ordering
  *
- * For a successful fresh call with retries:
- *   onAttempt (1) → onAttempt (2) → onRetry (1→2) → onAttempt (3) → onFinalSuccess
+ * Fresh call with retries:
+ *   onAttempt(1) -> onRetry(1->2) -> onAttempt(2) -> onRetry(2->3) -> onAttempt(3) -> onFinalSuccess
  *
- * For a cache hit:
- *   onCacheHit → onFinalSuccess
- *
- * For a dedupe joiner:
- *   onDedupeJoin → onFinalSuccess (or onFinalFailure)
- *
- * For a timeout:
- *   onAttempt → onTimeout → onFinalFailure
+ * Cache hit:    onCacheHit -> onFinalSuccess
+ * Dedupe join:  onDedupeJoin -> onFinalSuccess (or onFinalFailure)
+ * Timeout:      onAttempt -> onTimeout -> onFinalFailure
  */
 
-import type { ActSource } from './types/index.js'
+import type { ActSource, ActlyFailedBy } from './types/index.js'
 
 /** Stable discriminator for telemetry. */
 export type ActlyEventType =
@@ -46,6 +32,8 @@ export type ActlyEventType =
   | 'timeout'
   | 'final-success'
   | 'final-failure'
+  | 'backpressure'
+  | 'watchdog'
 
 /** Common fields on every event. */
 export interface ActlyEventBase {
@@ -119,14 +107,12 @@ export interface FinalFailureEvent extends ActlyEventBase {
   readonly attempts: number
   /** Total wall-clock duration of the act() call. */
   readonly durationMs: number
-  /** Stable reason for failure — use for telemetry tags. */
-  readonly failedBy:
-    | 'abort'
-    | 'timeout'
-    | 'total-timeout'
-    | 'retry-exhausted'
-    | 'fn-error'
-    | 'validation'
+  /**
+   * Stable reason for failure - use for telemetry tags. Re-exported as
+   * `ActlyFailedBy` so `AuditEntry.failedBy` and this field share one
+   * source of truth.
+   */
+  readonly failedBy: ActlyFailedBy
   /** The final error. */
   readonly error: unknown
 }
@@ -140,6 +126,35 @@ export type ActlyEvent =
   | TimeoutEvent
   | FinalSuccessEvent
   | FinalFailureEvent
+  | BackpressureEvent
+  | WatchdogEvent
+
+export interface BackpressureEvent extends ActlyEventBase {
+  readonly type: 'backpressure'
+  /** Which policy emitted the backpressure signal. */
+  readonly source: 'bulkhead'
+  /** Current queue length (callers waiting for a slot). */
+  readonly queueLength: number
+  /** Configured maxConcurrent for this key. */
+  readonly maxConcurrent: number
+  /** Configured maxQueueSize for this key (Infinity if unbounded). */
+  readonly maxQueueSize: number
+  /** Utilization ratio (queueLength / maxQueueSize). 1.0 = full. */
+  readonly utilization: number
+}
+
+/**
+ * Watchdog fired: an in-flight `act()` has been pending past the
+ * configured threshold (default 60s). Opt-in via `enableWatchdog()` -
+ * off by default to avoid per-call timer overhead.
+ */
+export interface WatchdogEvent extends ActlyEventBase {
+  readonly type: 'watchdog'
+  /** How long the call has been in-flight (ms). */
+  readonly elapsedMs: number
+  /** The scope the stuck call is in. */
+  readonly scope: string
+}
 
 /**
  * User-supplied observability hooks. All optional. When absent, zero
@@ -154,25 +169,34 @@ export interface ObservabilityHooks {
   onTimeout?: (event: TimeoutEvent) => void
   onFinalSuccess?: (event: FinalSuccessEvent) => void
   onFinalFailure?: (event: FinalFailureEvent) => void
+  /**
+   * Bulkhead queue utilization crossed 80%. Emitted at most once per
+   * crossing (not on every call) so callers can throttle upstream
+   * before the bulkhead starts rejecting.
+   */
+  onBackpressure?: (event: BackpressureEvent) => void
+  /**
+   * Watchdog threshold exceeded for an in-flight call. Opt-in via
+   * `enableWatchdog()`; not fired by default.
+   */
+  onWatchdog?: (event: WatchdogEvent) => void
 }
 
 /**
- * Internal: thread observability through the policy chain without changing
- * every policy's signature. We attach it to `PolicyContext` as an optional
- * field — policies that emit events check for its presence.
- *
- * `traceId` is also stored here so policies can include it in events.
+ * Threads observability through the policy chain without changing every
+ * policy's signature. Attached to `PolicyContext` as an optional field;
+ * policies that emit events check for its presence. `traceId` lives here
+ * too so policies can stamp it onto events.
  */
 export interface ObservabilityContext {
   traceId: string
   hooks: ObservabilityHooks
-  /** Counter for dedupe joiner position. Per-key, but we approximate by call. */
+  /** Per-call counter for dedupe joiner position (approximate). */
   joinerCounter: number
 }
 
 /**
- * Quick null-check helper. Policies call this once at decision points; if
- * it returns false, no further observability work is done.
+ * Policies call this once at decision points. False = skip all event work.
  */
 export function hasObservers(ctx: { observability?: ObservabilityContext }): ctx is { observability: ObservabilityContext } {
   return ctx.observability != null

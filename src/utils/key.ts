@@ -1,52 +1,46 @@
-/**
- * Key sanitisation — the first line of defence against:
- *
- *  - **Prototype pollution**: `__proto__`, `constructor`, `prototype` as keys
- *    bypass namespace isolation in plain-object store adapters.
- *  - **Control-char injection**: `\x00`–`\x1f`, `\x7f` break some store
- *    backends (Redis Lua, HTTP header logs, JSON-LD contexts).
- *  - **CRLF injection**: `\r\n` in keys can break naive log/HTTP serializers.
- *  - **Memory exhaustion**: unbounded key length lets a caller store a 10MB
- *    string as a key, bloating the store and blocking iteration.
- *  - **Namespace collision**: user keys starting with `dedupe:`, `cache:`,
- *    or `__inflight:` would clobber internal slots.
- *
- * # Why a dedicated module?
- *
- * Key validation is security-sensitive. Centralising it here means every
- * call site (`act()`, `invalidate()`, `withStore().invalidate()`) applies
- * the same rules. Local inlining risks drift.
- */
+// Key sanitisation. Centralised so every call site (act(), invalidate(),
+// withStore().invalidate()) applies the same rules - local inlining drifts.
+//
+// Defends against:
+//  - prototype pollution via __proto__/constructor/prototype (and other
+//    Object.prototype method names that naive store adapters would shadow)
+//  - control-char + CRLF injection that breaks Redis Lua, log serializers,
+//    HTTP header values
+//  - unbounded key length bloating stores
+//  - collisions with internal namespaces (dedupe:, cache:, inflight:, tenant:)
 
 import { LIMITS } from './limits.js'
 
-const RESERVED_PREFIXES = ['dedupe:', 'cache:', '__inflight:', '__tenant:', 'tenant:'] as const
+const RESERVED_PREFIXES = ['dedupe:', 'cache:', 'inflight:', 'tenant:'] as const
 
-/**
- * Strings that, if used as Map keys, are safe — but if used as plain-object
- * keys (e.g. a naive store adapter) enable prototype pollution. Reject them
- * regardless of store type: the contract is "your key is safe everywhere".
- */
-const FORBIDDEN_LITERALS = new Set(['__proto__', 'constructor', 'prototype'])
+// Reject as keys regardless of store type - the contract is "your key is
+// safe everywhere", even on a naive plain-object adapter.
+const FORBIDDEN_LITERALS = new Set([
+  '__proto__',
+  'constructor',
+  'prototype',
+  'hasOwnProperty',
+  'toString',
+  'valueOf',
+  'isPrototypeOf',
+  'propertyIsEnumerable',
+  'toLocaleString',
+])
 
-/**
- * Reject any character in the C0 control range, DEL (0x7f), or CRLF.
- * Allow TAB (0x09) and LF (0x0a) since some callers embed newlines in
- * structured keys legitimately — but CR is always forbidden.
- */
+// C0 control range, DEL, and CRLF. LF and TAB are allowed - some callers
+// embed newlines in structured keys legitimately.
+// eslint-disable-next-line no-control-regex
 const UNSAFE_CHAR = /[\x00-\x08\x0b\x0c\x0d\x0e-\x1f\x7f]/
 
 /**
- * Validate a user-supplied key. Throws synchronously on invalid input.
- *
- * Programmer errors throw — they must not be swallowed into an `ActFailure`
- * because the caller's code is broken.
+ * Validate a user-supplied key. Throws synchronously on invalid input -
+ * programmer errors must surface, not get swallowed into an ActFailure.
  *
  * @returns the same `key` (for chaining); never transforms it.
  */
 export function sanitizeKey(key: string): string {
   if (typeof key !== 'string') {
-    throw new TypeError(`Actly: key must be a string, got ${typeName(key)}`)
+    throw new TypeError(`Actly: key must be a string, got ${key === null ? 'null' : typeof key}`)
   }
   if (key.length === 0) {
     throw new RangeError(
@@ -81,9 +75,4 @@ export function sanitizeKey(key: string): string {
     }
   }
   return key
-}
-
-function typeName(v: unknown): string {
-  if (v === null) return 'null'
-  return typeof v
 }

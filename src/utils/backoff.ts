@@ -1,21 +1,16 @@
 import type { RetryOptions } from '../types/index.js'
 
 /**
- * Compute the delay before the next retry attempt, applying backoff, cap, and
- * jitter in that order.
+ * Compute the delay before the next retry attempt.
  *
- * Order matters:
- *  1. `backoff` grows the base delay geometrically/linearly.
- *  2. `maxDelay` caps the result (prevents exponential blowup).
- *  3. `jitter` randomises within `[0, delay]` (prevents thundering herd).
- *
- * Returns 0 if `delayMs` is 0 or undefined — skipping the sleep entirely.
+ * Order: backoff grows the base delay, maxDelay caps it, jitter randomises
+ * within [0, delay] to prevent thundering herd. Returns 0 when delayMs is
+ * unset so callers can skip the sleep entirely.
  */
 export function computeDelay(attempt: number, opts: RetryOptions): number {
   const base = opts.delayMs ?? 0
   if (base === 0) return 0
 
-  // Step 1: backoff
   let delay: number
   switch (opts.backoff ?? 'none') {
     case 'linear':      delay = base * attempt; break
@@ -23,24 +18,21 @@ export function computeDelay(attempt: number, opts: RetryOptions): number {
     default:            delay = base
   }
 
-  // Step 2: cap (guard against Infinity and NaN before Math.min)
+  // Cap. Guard Infinity/NaN before Math.min - NaN poisons both args.
   const max = opts.maxDelay ?? Number.POSITIVE_INFINITY
   if (!Number.isFinite(delay)) delay = max
   delay = Math.min(delay, max)
 
-  // Step 3: jitter
-  // All jitter variants produce a delay in [0, delay].
-  // The `decorrelated` formula `base + random() * (delay - base)` assumes
-  // delay >= base, which can be violated when maxDelay caps below base.
-  // Fix: clamp the final result to [0, delay] to guarantee the cap holds.
+  // Jitter. All variants produce a value in [0, delay].
   switch (opts.jitter ?? 'full') {
     case 'none':         return delay
     case 'full':         return Math.random() * delay
     case 'equal':        return delay / 2 + Math.random() * delay / 2
     case 'decorrelated': {
-      // If delay < base (maxDelay capped below base), decorrelated degrades
-      // to full jitter — the formula would otherwise produce values > delay.
-      const lo = Math.min(base, delay)
+      // When maxDelay caps delay below base, the [base, delay] interval is
+      // empty - fall back to full jitter so we still spread the calls.
+      if (delay < base) return Math.random() * delay
+      const lo = base
       const hi = delay
       const result = lo + Math.random() * (hi - lo)
       return Math.max(0, Math.min(result, delay))

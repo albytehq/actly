@@ -7,8 +7,10 @@
     "rootDir": "src",
     "declaration": false,
     "declarationMap": false,
-    "sourceMap": false
+    "sourceMap": false,
+    "removeComments": true,
+    "stripInternal": true
   },
   "include": ["src"],
-  "exclude": ["node_modules", "dist", "src/__tests__"]
+  "exclude": ["node_modules", "dist", "src/__tests__", "src/state"]
 }

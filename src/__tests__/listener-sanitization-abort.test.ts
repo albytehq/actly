@@ -16,11 +16,11 @@ describe('BUG-D30: hedge second call unhandled rejection', () => {
       const fn = async (signal: AbortSignal) => {
         callCount++
         if (callCount === 1) {
-          // Primary: slow but succeeds
+          // primary: slow but succeeds
           await wait(60)
           return 'primary'
         }
-        // Hedge: slow, then rejects AFTER primary wins
+        // hedge: slow, then rejects after primary wins
         await wait(80)
         throw new Error('hedge-failed-late')
       }
@@ -35,7 +35,7 @@ describe('BUG-D30: hedge second call unhandled rejection', () => {
       // Wait for hedge to eventually reject
       await wait(100)
 
-      // After fix: hedge rejection should be marked as handled
+      // hedge rejection should be marked as handled
       expect(unhandledRejection).toBe(false)
     } finally {
       process.off('unhandledRejection', handler)
@@ -47,10 +47,9 @@ describe('BUG-D30: hedge second call unhandled rejection', () => {
 
 describe('BUG-D32: bulkhead listener leak on wrong signal', () => {
   it('queued caller abort listener is removed from their own signal, not releaser signal', async () => {
-    // This test verifies the fix indirectly: if listener leaks on the
-    // queued caller's signal, that signal can never be GC'd while the
-    // bulkhead state exists. We test by checking that a queued caller
-    // who aborts is properly cleaned up.
+    // Indirect check: if the listener leaks on the queued caller's signal,
+    // that signal can't be GC'd while the bulkhead state exists. We verify
+    // a queued caller who aborts is properly cleaned up.
 
     let resolveFn!: () => void
     const fnPromise = new Promise<void>(r => { resolveFn = r })
@@ -78,7 +77,7 @@ describe('BUG-D32: bulkhead listener leak on wrong signal', () => {
     })
     await wait(10)
 
-    // Caller 2 aborts — should be removed from queue
+    // Caller 2 aborts; should be removed from queue
     controller2.abort(new Error('c2-cancel'))
     const r2 = await p2
     expect(r2.ok).toBe(false)
@@ -103,7 +102,7 @@ describe('BUG-D33: circuit breaker counts aborts as failures', () => {
     // Call 1: caller aborts mid-operation
     const controller1 = new AbortController()
     const p1 = act(key, async (signal) => {
-      // Wait for abort
+      // wait for abort
       return new Promise<string>((_, reject) => {
         signal.addEventListener('abort', () => reject(signal.reason), { once: true })
       })
@@ -115,7 +114,7 @@ describe('BUG-D33: circuit breaker counts aborts as failures', () => {
     const r1 = await p1
     expect(r1.ok).toBe(false)
 
-    // Call 2: should succeed — breaker should NOT have counted the abort as failure
+    // Call 2: should succeed; breaker should not have counted the abort as failure
     const r2 = await act(key, async () => 'success', {
       circuitBreaker: { threshold: 3, cooldownMs: 10_000 },
     })
@@ -140,7 +139,7 @@ describe('BUG-D34: health check stores unsanitized error messages', () => {
 
     const status = health()
     expect(status.lastError).toBeDefined()
-    // After fix: message should be HTML-escaped
+    // message should be HTML-escaped
     expect(status.lastError!.message).not.toContain('<script>')
     expect(status.lastError!.message).toContain('&lt;script&gt;')
     store.destroy()

@@ -1,18 +1,10 @@
 import type { ActFn, PolicyApplier, PolicyContext, TimeoutOptions } from '../types/index.js'
 import { linkSignal } from '../utils/abort.js'
+import { safeCall } from '../utils/safeCall.js'
 import { TimeoutError, TotalTimeoutError } from '../errors.js'
 
-// ─── Errors ───────────────────────────────────────────────────────────────────
-//
-// TimeoutError and TotalTimeoutError live in `src/errors.ts` and
-// now extend `ActlyError` (which extends `Error`). Existing `instanceof
-// Error` and `instanceof TimeoutError` checks continue to work; new
-// `instanceof ActlyError` and `.code` field give consumers a stable
-// discriminator for telemetry.
-//
-// Re-exported here for backwards compatibility with code that imports
-// from `'actly/policies/timeout'` (the deep path).
-
+// TimeoutError / TotalTimeoutError live in src/errors.ts and extend ActlyError.
+// Re-exported here for callers using the deep import path.
 export { TimeoutError, TotalTimeoutError }
 
 // ─── Policy ───────────────────────────────────────────────────────────────────
@@ -20,61 +12,73 @@ export { TimeoutError, TotalTimeoutError }
 /**
  * Build a timeout policy that throws `ErrorCtor` on deadline.
  *
- * # Cancellation contract
+ * Each invocation arms a `setTimeout` that aborts a fresh controller, links
+ * the parent signal (so parent abort propagates), then races `fn(childSignal)`
+ * against the abort event. The race lets `act()` return promptly even if `fn`
+ * ignores the signal; if `fn` cooperates (passes signal to fetch, etc.) the
+ * underlying work is cancelled cleanly.
  *
- * Each invocation:
- *   1. Creates a fresh `AbortController` for this attempt.
- *   2. Arms a `setTimeout` that aborts the controller with a fresh `ErrorCtor(ms)`.
- *   3. Links the parent signal: if the parent aborts (e.g. `totalTimeout` or
- *      caller cancellation), the child aborts with the parent's reason.
- *   4. Races `fn(childSignal)` against the abort event.
- *
- * The race is critical: it ensures `act()` returns promptly even if `fn`
- * ignores the signal. The underlying `fn` may keep running in the background
- * (resource leak), but the caller is unblocked. This is the best JavaScript
- * can do without cooperation from `fn`.
- *
- * If `fn` cooperates (passes `signal` to `fetch`, `AbortController`, etc.),
- * the underlying work is cancelled properly — no leak.
- *
- * # Error attribution
- *
- * If the per-attempt timer fires, we throw `ErrorCtor(ms)` regardless of
- * what `fn` does. If the parent signal fires first, we throw the parent's
- * reason (could be `TotalTimeoutError`, an `AbortError`, or anything else).
+ * If the per-attempt timer fires, throws `ErrorCtor(ms)`. If the parent
+ * fires first, throws the parent's reason (`TotalTimeoutError`, AbortError,
+ * etc.).
  */
 function makeTimeoutPolicy<T>(
   opts: TimeoutOptions,
-  ErrorCtor: new (ms: number, options?: { key?: string }) => Error,
+  errorCtor: new (ms: number, options?: { key?: string }) => Error,
+  kind: 'per-attempt' | 'total',
 ): PolicyApplier<T> {
+  // 'race' (default) returns promptly at ms. 'cooperative' waits for fn to
+  // settle after the signal aborts - gentler on non-cooperating downstreams
+  // but can hang forever if fn never rejects.
+  const strategy = opts.strategy ?? 'race'
+
   return (fn: ActFn<T>, ctx: PolicyContext): ActFn<T> =>
     async (parentSignal: AbortSignal) => {
       const controller = new AbortController()
-      // Pass key to the error ctor for better debugging context.
-      const timerError = new ErrorCtor(opts.ms, { key: ctx.key })
+      const timerError = new errorCtor(opts.ms, { key: ctx.key })
 
-      // Arm the per-attempt timer. The error object is allocated once so the
-      // stack trace points here (the policy frame), not at setTimeout's
-      // internal callback.
+      // allocate the error once so the stack points here, not at setTimeout's
+      // internal callback
+      const obs = ctx.observability
+      let timedOut = false
       const timer = setTimeout(
-        () => controller.abort(timerError),
+        () => {
+          timedOut = true
+          // emit before aborting so observers can correlate
+          if (obs) {
+            safeCall(obs.hooks.onTimeout, {
+              type: 'timeout', key: ctx.key, traceId: obs.traceId,
+              timestamp: Date.now(), kind, ms: opts.ms,
+            })
+          }
+          controller.abort(timerError)
+        },
         opts.ms,
       )
-      // NOTE: do NOT `unref()` this timer. The timeout IS the operation
-      // the caller is awaiting. unref'ing would let Node exit the process
-      // while a timeout was pending — silently dropping the operation.
-      // The timer is cleared in the finally block below.
 
-      // Link parent → child. Capture the unlink function so we can clean
-      // up the listener on success path (contract).
       const unlink = linkSignal(parentSignal, controller)
 
       try {
-        // Race fn against the abort event. If fn settles first, we get its
-        // result/error. If the signal aborts first, we reject with reason.
-        //
-        // We do NOT use AbortSignal.timeout() here because we need to throw
-        // our own ErrorCtor, not a DOMException named "TimeoutError".
+        if (strategy === 'cooperative') {
+          // wait for fn to settle after the signal aborts; if fn settles
+          // before the timer, return that. If fn never rejects (ignores
+          // signal), we wait forever - the cooperative trade-off.
+          // honour a pre-aborted parent up front, matching 'race' behaviour.
+          if (parentSignal.aborted) {
+            throw parentSignal.reason
+          }
+          try {
+            const value = await fn(controller.signal)
+            return value
+          } catch (err) {
+            // timer fired + fn cooperated: throw the timer error (more
+            // informative); otherwise surface fn's actual error
+            if (timedOut) throw timerError
+            throw err
+          }
+        }
+
+        // 'race' strategy: race fn against the abort event
         return await new Promise<T>((resolve, reject) => {
           if (controller.signal.aborted) {
             reject(controller.signal.reason)
@@ -104,21 +108,16 @@ function makeTimeoutPolicy<T>(
 
 /**
  * Per-attempt timeout. Races `fn` against a deadline that resets on retry.
- *
- * Place this INSIDE `retryPolicy` (closer to `fn`) so each attempt has its
- * own clock.
+ * Place INSIDE `retryPolicy` so each attempt gets its own clock.
  */
 export function timeoutPolicy<T>(opts: TimeoutOptions): PolicyApplier<T> {
-  return makeTimeoutPolicy(opts, TimeoutError)
+  return makeTimeoutPolicy(opts, TimeoutError, 'per-attempt')
 }
 
 /**
- * Operation-wide timeout. Races the ENTIRE chain (all retry attempts +
- * delays) against a hard budget that does NOT reset.
- *
- * Place this as the OUTERMOST policy so the clock starts before any other
- * policy runs and stops regardless of what the inner chain is doing.
+ * Operation-wide timeout. Races the whole chain (all retries + delays)
+ * against a hard budget that does NOT reset. Place as the OUTERMOST policy.
  */
 export function totalTimeoutPolicy<T>(opts: TimeoutOptions): PolicyApplier<T> {
-  return makeTimeoutPolicy(opts, TotalTimeoutError)
+  return makeTimeoutPolicy(opts, TotalTimeoutError, 'total')
 }

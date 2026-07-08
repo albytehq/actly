@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.registerDrainable = registerDrainable;
 exports.unregisterDrainable = unregisterDrainable;
 exports.drain = drain;
+exports.drainAll = drainAll;
 const drainStates = new Map();
 function getState(scope) {
     let s = drainStates.get(scope);
@@ -22,16 +23,21 @@ function unregisterDrainable(scope = 'default') {
         for (const r of s.resolvers)
             r();
         s.resolvers = [];
+        if (scope !== 'default') {
+            drainStates.delete(scope);
+        }
     }
 }
-/**
- * Wait for all in-flight act() calls in this scope to settle.
- * Returns true if all settled within timeoutMs, false if timed out.
- */
 async function drain(timeoutMs, scope = 'default') {
-    const s = getState(scope);
-    if (s.inflight === 0)
+    const s = drainStates.get(scope);
+    if (!s)
         return true;
+    if (s.inflight === 0) {
+        if (scope !== 'default' && s.resolvers.length === 0) {
+            drainStates.delete(scope);
+        }
+        return true;
+    }
     return new Promise((resolve) => {
         let resolved = false;
         const resolver = () => {
@@ -39,7 +45,6 @@ async function drain(timeoutMs, scope = 'default') {
                 return;
             resolved = true;
             clearTimeout(timer);
-            // Remove this resolver from the array
             const idx = s.resolvers.indexOf(resolver);
             if (idx >= 0)
                 s.resolvers.splice(idx, 1);
@@ -49,7 +54,6 @@ async function drain(timeoutMs, scope = 'default') {
             if (resolved)
                 return;
             resolved = true;
-            // Remove this resolver from the array on timeout
             const idx = s.resolvers.indexOf(resolver);
             if (idx >= 0)
                 s.resolvers.splice(idx, 1);
@@ -57,4 +61,11 @@ async function drain(timeoutMs, scope = 'default') {
         }, timeoutMs);
         s.resolvers.push(resolver);
     });
+}
+async function drainAll(timeoutMs) {
+    const scopes = Array.from(drainStates.keys());
+    if (scopes.length === 0)
+        return true;
+    const results = await Promise.all(scopes.map(scope => drain(timeoutMs, scope)));
+    return results.every(r => r === true);
 }

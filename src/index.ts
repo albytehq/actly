@@ -11,12 +11,30 @@ export type {
   ScopedActAsync,
 } from './core/act.js'
 
+// HedgeTimeoutError lives in errors.ts; re-exported here so callers have a
+// single consistent error hierarchy.
+export {
+  HedgeTimeoutError,
+} from './errors.js'
+
 // ─── Execution engine (for custom policy chains) ──────────────────────────────
 
 export {
   execute,
   REQUIRES_SYNC_STORE,
 } from './core/executor.js'
+
+// Export the execute() input type so custom policy authors don't have to
+// reach for `Parameters<typeof execute>[0]`.
+export type {
+  ExecutorInput,
+} from './core/executor.js'
+
+// Re-export ObservabilityContext so callers can type the context object
+// they read from `PolicyContext.observability`.
+export type {
+  ObservabilityContext,
+} from './observability.js'
 
 // ─── Stores ───────────────────────────────────────────────────────────────────
 
@@ -37,6 +55,7 @@ export {
   TotalTimeoutError,
   RetryExhaustedError,
   ValidationError,
+  isActlyError,
 } from './errors.js'
 
 // ─── Observability ───────────────────────────────────────────────────────────
@@ -52,6 +71,8 @@ export type {
   TimeoutEvent,
   FinalSuccessEvent,
   FinalFailureEvent,
+  BackpressureEvent,
+  WatchdogEvent,
   ActlyEvent,
   ObservabilityHooks,
 } from './observability.js'
@@ -115,17 +136,22 @@ export {
   CircuitBreakerOpenError,
   BulkheadOverflowError,
   RateLimitError,
+  ResourceExhaustedError,
 } from './errors.js'
-
 // ─── Hardening: health check & graceful shutdown ─────────────────────────────
 
 export {
   createHealthCheck,
+  enableWatchdog,
+  registerWatchdogHooks,
+  unregisterWatchdogHooks,
+  disableWatchdog,
 } from './core/health.js'
-export type { HealthStatus } from './core/health.js'
+export type { HealthStatus, HealthCheckFn } from './core/health.js'
 
 export {
   drain,
+  drainAll,
 } from './core/shutdown.js'
 
 // ─── Hardening: tenant isolation ─────────────────────────────────────────────
@@ -162,3 +188,15 @@ export type {
   AuditOptions,
   AuditEntry,
 } from './types/index.js'
+
+// ─── Hardening: noop policy (Cockatiel parity, useful for testing) ───────────
+
+export {
+  noopPolicy,
+} from './policies/noop.js'
+
+// ─── Hardening: @usePolicy decorator (Cockatiel parity) ─────────────────────
+
+export {
+  usePolicy,
+} from './utils/decorator.js'

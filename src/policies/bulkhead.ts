@@ -2,6 +2,7 @@ import type { ActFn, PolicyApplier, PolicyContext, BulkheadOptions } from '../ty
 import type { SyncStateStore } from '../stores/base.js'
 import { REQUIRES_SYNC_STORE } from '../core/executor.js'
 import { BulkheadOverflowError } from '../errors.js'
+import { safeCall } from '../utils/safeCall.js'
 
 const NS = 'bulk:'
 
@@ -27,6 +28,7 @@ function setState(store: SyncStateStore, key: string, state: BulkheadState): voi
 export function bulkheadPolicy<T>(opts: BulkheadOptions): PolicyApplier<T> {
   const maxConcurrent = Math.max(1, Math.floor(opts.maxConcurrent))
   const queueTimeoutMs = opts.queueTimeoutMs ?? 0
+  const maxQueueSize = opts.maxQueueSize ?? Number.POSITIVE_INFINITY
 
   const applier = (fn: ActFn<T>, ctx: PolicyContext): ActFn<T> => {
     const syncCtx = ctx as Omit<PolicyContext, 'store'> & { store: SyncStateStore }
@@ -35,12 +37,12 @@ export function bulkheadPolicy<T>(opts: BulkheadOptions): PolicyApplier<T> {
       const key = syncCtx.key
 
       const acquireSlot = (): Promise<void> => {
-        // If signal already aborted, reject immediately
         if (signal.aborted) return Promise.reject(signal.reason)
 
         const state = getState(syncCtx.store, key)
         if (state.active < maxConcurrent) {
           state.active++
+          // persist - getState may have returned a fresh default
           setState(syncCtx.store, key, state)
           return Promise.resolve()
         }
@@ -49,15 +51,32 @@ export function bulkheadPolicy<T>(opts: BulkheadOptions): PolicyApplier<T> {
           throw new BulkheadOverflowError(key, maxConcurrent)
         }
 
+        // bound the queue to prevent OOM under stampede - without this a
+        // 100k-caller spike against maxConcurrent:10 would queue 99990
+        // callers, each holding a resolver + timer + listener closure.
+        const currentState = getState(syncCtx.store, key)
+        if (currentState.queue.length >= maxQueueSize) {
+          throw new BulkheadOverflowError(key, maxConcurrent)
+        }
+
         return new Promise<void>((resolve, reject) => {
           const state2 = getState(syncCtx.store, key)
-          const entry: { resolve: () => void; reject: (e: unknown) => void; timer?: ReturnType<typeof setTimeout>; onAbort?: () => void; signal?: AbortSignal } = {
+          // declare all fields up front so V8 sees one hidden class for
+          // every queue entry - keeps ICs monomorphic
+          const entry: {
+            resolve: () => void
+            reject: (e: unknown) => void
+            timer: ReturnType<typeof setTimeout> | undefined
+            onAbort: (() => void) | undefined
+            signal: AbortSignal | undefined
+          } = {
             resolve,
             reject,
+            timer: undefined,
+            onAbort: undefined,
             signal,
           }
 
-          // Remove entry from queue on signal abort
           entry.onAbort = () => {
             const s = getState(syncCtx.store, key)
             const idx = s.queue.indexOf(entry)
@@ -82,6 +101,31 @@ export function bulkheadPolicy<T>(opts: BulkheadOptions): PolicyApplier<T> {
 
           signal.addEventListener('abort', entry.onAbort!, { once: true })
           state2.queue.push(entry)
+
+          // emit onBackpressure at most once per 80%-crossing to avoid spam.
+          // Checked after pushing so utilization includes this caller.
+          const obs = syncCtx.observability
+          if (obs && maxQueueSize !== Number.POSITIVE_INFINITY) {
+            const utilization = state2.queue.length / maxQueueSize
+            const wasOver80 = (state2 as { backpressureEmitted?: boolean }).backpressureEmitted === true
+            if (utilization >= 0.8 && !wasOver80) {
+              ;(state2 as { backpressureEmitted?: boolean }).backpressureEmitted = true
+              safeCall(obs.hooks.onBackpressure, {
+                type: 'backpressure',
+                key: syncCtx.key,
+                traceId: obs.traceId,
+                timestamp: Date.now(),
+                source: 'bulkhead',
+                queueLength: state2.queue.length,
+                maxConcurrent,
+                maxQueueSize,
+                utilization,
+              })
+            } else if (utilization < 0.8 && wasOver80) {
+              ;(state2 as { backpressureEmitted?: boolean }).backpressureEmitted = false
+            }
+          }
+
           setState(syncCtx.store, key, state2)
         })
       }
@@ -93,14 +137,27 @@ export function bulkheadPolicy<T>(opts: BulkheadOptions): PolicyApplier<T> {
           const next = state.queue.shift()!
           state.active++
           if (next.timer) clearTimeout(next.timer)
-          // Remove abort listener from the QUEUED caller's signal (not releaser's)
+          // drop the abort listener from the QUEUED caller's signal, not the releaser's
           if (next.onAbort && next.signal) {
             next.signal.removeEventListener('abort', next.onAbort)
           }
           next.resolve()
         }
         if (state.active < 0) state.active = 0
-        setState(syncCtx.store, key, state)
+        // reset the backpressure flag on release too - if the queue drains
+        // purely via releases with no new callers, the acquire path never
+        // gets a chance to clear it and the next 80%-crossing is dropped.
+        if (maxQueueSize !== Number.POSITIVE_INFINITY && (state as { backpressureEmitted?: boolean }).backpressureEmitted === true) {
+          if (state.queue.length / maxQueueSize < 0.8) {
+            ;(state as { backpressureEmitted?: boolean }).backpressureEmitted = false
+          }
+        }
+        // drop idle state so high-cardinality keys don't accumulate
+        if (state.active === 0 && state.queue.length === 0) {
+          syncCtx.store.delete(NS + key)
+        } else {
+          setState(syncCtx.store, key, state)
+        }
       }
 
       await acquireSlot()

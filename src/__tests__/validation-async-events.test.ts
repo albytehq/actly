@@ -7,8 +7,8 @@ const wait = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
 
 describe('BUG-D20: hardening options not validated', () => {
   it('circuitBreaker.threshold = -5 should throw, not silently coerce', async () => {
-    // Without validation: Math.max(1, Math.floor(-5)) = 1, silently coerced
-    // With validation: should throw RangeError
+    // without validation: Math.max(1, Math.floor(-5)) = 1, silently coerced.
+    // validation throws RangeError instead.
     await expect(
       act('d20-cb:test', async () => 'ok', {
         circuitBreaker: { threshold: -5, cooldownMs: 1000 },
@@ -106,7 +106,7 @@ describe('BUG-D21: async store cache events', () => {
       },
     })
 
-    // After fix: async store should emit cache-miss then cache-hit
+    // async store should emit cache-miss then cache-hit
     expect(events).toContain('miss')
     expect(events).toContain('hit')
   })
@@ -148,9 +148,9 @@ describe('BUG-D22: bulkhead signal abort', () => {
     resolveFn()
     await p1
 
-    // After fix: the queued entry should have been removed on abort.
-    // A third call should get a slot immediately (not be stuck behind
-    // the aborted entry's ghost in the queue).
+    // the queued entry should have been removed on abort. A third call
+    // should get a slot immediately, not sit behind the aborted entry's
+    // ghost in the queue.
     const r3 = await act(key, async () => 'third', {
       bulkhead: { maxConcurrent: 1, queueTimeoutMs: 100 },
     })

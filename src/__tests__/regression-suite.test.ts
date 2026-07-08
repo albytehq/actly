@@ -1,13 +1,11 @@
 /**
- * Regression suite — locks in fixes for defects found during the v1.2.0
- * hardening audit (see CHANGELOG.md), plus targeted edge-case coverage
- * for boundary conditions around key validation, retry/dedupe semantics,
- * and cache LRU eviction.
+ * Regression suite for defects found during the v1.2.0 hardening audit
+ * (see CHANGELOG.md), plus edge-case coverage for key validation,
+ * retry/dedupe semantics, and cache LRU eviction.
  *
- * Each `describe` block documents the specific defect or edge case it
- * guards against, so a future regression is easy to trace back to its
- * origin. These tests must stay green — a failure here means a
- * previously fixed defect has resurfaced or an invariant was violated.
+ * Each `describe` block documents the defect or edge case it guards against,
+ * so a future regression traces back to its origin. A failure here means a
+ * fixed defect has resurfaced or an invariant was violated.
  *
  * Run: npx vitest run src/__tests__/regression-suite.test.ts
  */
@@ -20,14 +18,10 @@ const wait = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
 
 describe('backoff: decorrelated jitter never goes negative when maxDelay caps below base', () => {
   it('computeDelay returns non-negative for decorrelated when maxDelay < delayMs', () => {
-    // Scenario: delayMs=1000, backoff=exponential, maxDelay=100, jitter=decorrelated
-    // At attempt=2: delay = 1000 * 2^1 = 2000, capped to 100
-    // decorrelated formula: base + random() * (delay - base) = 1000 + random() * (100 - 1000)
-    //                                                       = 1000 + random() * (-900)
-    //                                                       = [100, 1000] — WRONG! Should be [0, 100]
-    //
-    // The formula assumes delay >= base, which is violated when maxDelay caps below base.
-    // Result: delay can exceed maxDelay (up to delayMs), defeating the cap entirely.
+    // delayMs=1000, attempt=2: exponential gives 2000, capped to 100.
+    // decorrelated formula: base + random()*(delay - base) = 1000 + random()*(-900)
+    // = [100, 1000] when delay < base, exceeding maxDelay.
+    // The formula assumes delay >= base; the cap below base breaks that.
     const opts = {
       attempts: 3,
       delayMs: 1000,
@@ -45,9 +39,9 @@ describe('backoff: decorrelated jitter never goes negative when maxDelay caps be
       minObserved = Math.min(minObserved, d)
     }
 
-    // After fix: delay should be in [0, maxDelay=100]
-    expect(maxObserved).toBeLessThanOrEqual(100)  // should NOT exceed maxDelay
-    expect(minObserved).toBeGreaterThanOrEqual(0) // should NOT be negative
+    // delay should be in [0, maxDelay=100]
+    expect(maxObserved).toBeLessThanOrEqual(100)  // not exceeding maxDelay
+    expect(minObserved).toBeGreaterThanOrEqual(0) // not negative
   })
 })
 
@@ -66,7 +60,7 @@ describe('cache: onCacheHit reports accurate age, not always 0', () => {
     // Wait 50ms so age is non-zero
     await wait(50)
 
-    // Second call: cache hit — should report ageMs ≈ 50+
+    // Second call: cache hit, reports ageMs ~ 50+
     await act('regr-age:test', async () => 'fresh', {
       cache: { ttl: 60_000 },
       observability: {
@@ -75,7 +69,7 @@ describe('cache: onCacheHit reports accurate age, not always 0', () => {
     })
 
     expect(capturedAgeMs).toBeDefined()
-    // After fix: ageMs should reflect actual age (>= 40ms with timing slack)
+    // ageMs reflects actual age (>= 40ms with timing slack)
     expect(capturedAgeMs!).toBeGreaterThanOrEqual(40)
   })
 })
@@ -84,13 +78,9 @@ describe('cache: onCacheHit reports accurate age, not always 0', () => {
 
 describe('withStore: async invalidate has no TOCTOU race', () => {
   it('async invalidate returns correct existed flag without TOCTOU race', async () => {
-    // The old implementation does:
-    //   const existed = await store.has(key)   // ← might be true
-    //   await store.delete(key)                 // ← another caller might have deleted
-    //   return existed                          // ← returns true even though delete was no-op
-    //
-    // The fix: just call delete() and return whether it actually deleted.
-    // But we can't easily test the race — we test the contract instead.
+    // The contract: delete() returns whether it actually deleted, so the
+    // caller doesn't need a separate has() check that could race with
+    // another concurrent delete.
 
     const asyncStore = {
       _sync: false as const,
@@ -120,11 +110,11 @@ describe('withStore: async invalidate has no TOCTOU race', () => {
     // Populate cache
     await scopedAct('regr-toctou:test', async () => 'value', { cache: { ttl: 60_000 } })
 
-    // Invalidate — should return true (existed)
+    // Invalidate: should return true (existed)
     const existed = await scopedAct.invalidate('regr-toctou:test')
     expect(existed).toBe(true)
 
-    // Invalidate again — should return false (already deleted)
+    // Invalidate again: should return false (already deleted)
     const existedAgain = await scopedAct.invalidate('regr-toctou:test')
     expect(existedAgain).toBe(false)
   })
@@ -134,11 +124,10 @@ describe('withStore: async invalidate has no TOCTOU race', () => {
 
 describe('limits: no stale references to unimplemented APIs', () => {
   it('LIMITS is a plain const, not configurable (contrary to old comment)', () => {
-    // The old comment said: "Tunable per-instance via configure({ limits }) (Phase 12)."
-    // But configure() was never implemented. This test verifies LIMITS is NOT configurable.
+    // LIMITS is not configurable; the comment that claimed otherwise is gone.
     expect(typeof LIMITS).toBe('object')
     expect(LIMITS.MAX_KEY_LENGTH).toBe(1024)
-    // LIMITS should be frozen/readonly — not mutable
+    // LIMITS is frozen/readonly; not mutable
     expect(() => { (LIMITS as { MAX_KEY_LENGTH: number }).MAX_KEY_LENGTH = 999 }).toThrow()
   })
 })
@@ -207,28 +196,28 @@ describe('retry: attempts=1 behaves as a single-shot call', () => {
 
     expect(r.ok).toBe(false)
     expect(calls).toBe(1)  // no retry
-    // Should NOT be wrapped in RetryExhaustedError (no retries happened)
+    // not wrapped in RetryExhaustedError (no retries happened)
     if (!r.ok) {
       expect((r.error as Error).message).toBe('fail')  // raw error, not wrapped
     }
   })
 })
 
-// ─── EDGE-4: dedupe without timeout — hung fn blocks slot ───────────────────
+// ─── EDGE-4: dedupe without timeout, hung fn blocks slot ───────────────────
 
 describe('dedupe: behaves correctly without timeout or inflightTtl', () => {
   it('hung originator blocks all subsequent joiners indefinitely', async () => {
     let fnResolve!: (v: string) => void
     const hungPromise = new Promise<string>((resolve) => { fnResolve = resolve })
 
-    // Originator starts a hung fn with NO inflightTtl and NO timeout
+    // Originator starts a hung fn with no inflightTtl and no timeout
     const originatorPromise = act('regr-hung-dedupe:test', () => hungPromise, {
       dedupe: true,  // no inflightTtl = Infinity
     })
 
     await wait(20)
 
-    // Joiner arrives — will be stuck waiting for originator
+    // Joiner arrives; stuck waiting for originator
     const joinerPromise = act('regr-hung-dedupe:test', async () => 'fresh', {
       dedupe: true,
     })
@@ -236,8 +225,7 @@ describe('dedupe: behaves correctly without timeout or inflightTtl', () => {
     // Both should still be pending after 100ms
     await wait(100)
     expect(originatorPromise).toBeDefined()  // still pending
-    // Joiner is also still pending — this is the documented behavior,
-    // but it's a production trap: without timeout or inflightTtl,
+    // Joiner is also still pending. Without timeout or inflightTtl,
     // a hung fn permanently blocks the dedupe slot.
 
     // Cleanup
@@ -258,7 +246,7 @@ describe('act: default store is shared across callers', () => {
       cache: { ttl: 60_000 },
     })
 
-    // Caller B reads the cached value — NO way to isolate without withStore()
+    // Caller B reads the cached value; no way to isolate without withStore()
     const r = await act('regr-shared-store:test', async () => 'caller-B-value', {
       cache: { ttl: 60_000 },
     })
@@ -275,12 +263,10 @@ describe('act: default store is shared across callers', () => {
 
 describe('errors: classifyFailure resists error-name spoofing', () => {
   it('throwing { name: "AbortError" } is classified as abort', async () => {
-    // The classifyFailure function checks error.name === 'AbortError' for
-    // non-ActlyError errors. A caller throwing a plain object with name
-    // spoofing will be classified as 'abort' in the failedBy discriminator.
-    //
-    // This is a low-severity issue: failedBy is for telemetry, not security.
-    // But it means an attacker could mask fn-error as abort in metrics.
+    // classifyFailure checks error.name === 'AbortError' for non-ActlyError
+    // errors. A plain object with a spoofed name would be classified as
+    // 'abort' in the failedBy discriminator. failedBy is for telemetry,
+    // not security, but it lets an attacker mask fn-error as abort in metrics.
 
     const { act } = await import('../index.js')
     let capturedFailedBy: string | undefined
@@ -295,12 +281,10 @@ describe('errors: classifyFailure resists error-name spoofing', () => {
     })
 
     expect(r.ok).toBe(false)
-    // The error is NOT a real abort — it's a fn-error masquerading.
-    // But classifyFailure will classify it as 'abort' because of name sniffing.
-    //
-    // After hardening: classifyFailure should require instanceof Error
-    // before checking .name, to prevent plain-object spoofing.
-    expect(capturedFailedBy).toBe('fn-error')  // should NOT be 'abort'
+    // The error is not a real abort; it's a fn-error masquerading.
+    // classifyFailure requires instanceof Error before checking .name,
+    // so plain-object spoofing doesn't slip through.
+    expect(capturedFailedBy).toBe('fn-error')  // not 'abort'
   })
 })
 
@@ -308,9 +292,8 @@ describe('errors: classifyFailure resists error-name spoofing', () => {
 
 describe('InMemoryStore: LRU eviction under pressure', () => {
   it('high-cardinality keys cause eviction of useful cache entries', async () => {
-    // Default store maxSize=10_000. If caller caches 10,001 unique keys,
-    // the LRU entry is evicted — even if it was a useful, frequently-accessed key
-    // that just wasn't accessed in the last 10,000 operations.
+    // Default store maxSize=10_000. Caching 10,001 unique keys evicts the
+    // LRU entry, even if it was useful and just wasn't accessed recently.
 
     const store = new InMemoryStore({ maxSize: 5 })  // small for testing
     const scopedAct = withStore(store)
@@ -323,7 +306,7 @@ describe('InMemoryStore: LRU eviction under pressure', () => {
     // Access key 0 to make it "most recent"
     await scopedAct('regr-lru:0', async () => 'fresh', { cache: { ttl: 60_000 } })
 
-    // Add key 5 — should evict the LRU (key 1, not key 0)
+    // Add key 5; should evict the LRU (key 1, not key 0)
     await scopedAct('regr-lru:5', async () => 'val-5', { cache: { ttl: 60_000 } })
 
     // Key 0 should still be cached (we accessed it recently)

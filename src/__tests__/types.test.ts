@@ -1,8 +1,6 @@
 /**
- * Type-level tests.
- *
- * Asserts that public type contracts compile correctly. Run via vitest
- * (already included in the default test run via `expectTypeOf`).
+ * Type-level tests. Public type contracts must compile; vitest runs these
+ * via expectTypeOf alongside the runtime suite.
  */
 import { describe, it, expectTypeOf } from 'vitest'
 import { act, withStore, InMemoryStore, execute, RetryExhaustedError } from '../index.js'
@@ -42,7 +40,6 @@ describe('type-level contracts', () => {
       expectTypeOf(r.value).toEqualTypeOf<string>()
       expectTypeOf(r.source).toEqualTypeOf<'fresh' | 'cache'>()
       expectTypeOf(r.attempts).toEqualTypeOf<number>()
-      // optional fields
       expectTypeOf(r.traceId).toEqualTypeOf<string | undefined>()
       expectTypeOf(r.durationMs).toEqualTypeOf<number | undefined>()
     }

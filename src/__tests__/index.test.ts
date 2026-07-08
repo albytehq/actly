@@ -106,7 +106,7 @@ describe('act() input validation (fixes M-3, M-4)', () => {
   it('throws on reserved prefix key', async () => {
     await expect(act('dedupe:foo', async () => 1)).rejects.toThrow(/reserved prefix/)
     await expect(act('cache:foo', async () => 1)).rejects.toThrow(/reserved prefix/)
-    await expect(act('__inflight:foo', async () => 1)).rejects.toThrow(/reserved prefix/)
+    await expect(act('inflight:foo', async () => 1)).rejects.toThrow(/reserved prefix/)
   })
 
   it('throws on non-integer retry.attempts', async () => {
@@ -163,8 +163,7 @@ describe('retry policy (fixes M-7 jitter, M-4 validation, M-2 shouldRetry)', () 
     expect(r.ok).toBe(false)
     expect(calls).toBe(3)
     expect(r.attempts).toBe(3)
-    // Errors are wrapped in RetryExhaustedError when retries happened.
-    // The raw last error is available on `.lastError` and `.errors[]`.
+    // lastError/errors[] keep the raw cause; the wrapper carries the retry count.
     if (!r.ok) {
       const err = r.error as { message?: string; lastError?: Error; errors?: Error[]; attempts?: number }
       expect(err.message).toMatch(/retry exhausted after 3 attempts/)
@@ -189,7 +188,7 @@ describe('retry policy (fixes M-7 jitter, M-4 validation, M-2 shouldRetry)', () 
     })
 
     expect(r.ok).toBe(false)
-    expect(calls).toBe(1) // did not retry
+    expect(calls).toBe(1) // bailed, no retry
     expect(r.attempts).toBe(1)
   })
 
@@ -210,10 +209,9 @@ describe('retry policy (fixes M-7 jitter, M-4 validation, M-2 shouldRetry)', () 
     const controller = new AbortController()
     const promise = act('retry:abort-skip', async (signal) => {
       calls++
-      // First attempt: wait long enough for caller to abort
+      // First attempt runs long enough for the caller to abort mid-flight.
       if (calls === 1) {
         await sleep(50)
-        // Will be aborted by then
         signal; // touch to satisfy linter
       }
       return 'ok'
@@ -227,7 +225,7 @@ describe('retry policy (fixes M-7 jitter, M-4 validation, M-2 shouldRetry)', () 
     const r = await promise
 
     expect(r.ok).toBe(false)
-    // Should not retry on abort error — calls should be 1
+    // abort errors must not trigger a retry
     expect(calls).toBe(1)
   })
 
@@ -238,7 +236,6 @@ describe('retry policy (fixes M-7 jitter, M-4 validation, M-2 shouldRetry)', () 
     await act('retry:max-delay', async () => {
       calls++
       if (calls < 4) {
-        // Record time between attempts
         delays.push(Date.now() - (delays.length === 0 ? t0 : t0 + delays.reduce((a, b) => a + b, 0)))
         throw new Error('fail')
       }
@@ -253,8 +250,7 @@ describe('retry policy (fixes M-7 jitter, M-4 validation, M-2 shouldRetry)', () 
       },
     })
 
-    // Without maxDelay, delays would be 1000, 2000, 4000 ms (7s total)
-    // With maxDelay=50, all delays capped at 50ms (150ms total)
+    // without maxDelay we'd see 1000/2000/4000ms (~7s); with maxDelay=50 the whole run fits in ~150ms
     expect(Date.now() - t0).toBeLessThan(500)
   })
 
@@ -276,15 +272,14 @@ describe('retry policy (fixes M-7 jitter, M-4 validation, M-2 shouldRetry)', () 
         attempts: 3,
         delayMs: 100,
         backoff: 'none',
-        // jitter defaults to 'full' — delay should be in [0, 100)
+        // jitter defaults to 'full', so delay lands in [0, 100)
       },
     })
 
-    // Each delay should be < 100 (jittered) but >= 0
-    // Allow some timing slack
+    // jitter + scheduling overhead
     for (const d of delays) {
       expect(d).toBeGreaterThanOrEqual(0)
-      expect(d).toBeLessThan(150) // jitter + scheduling overhead
+      expect(d).toBeLessThan(150)
     }
   })
 })
@@ -327,13 +322,13 @@ describe('timeout policy (fixes C-2: AbortSignal-based cancellation)', () => {
   it('act() returns promptly even if fn ignores signal (race fallback)', async () => {
     const t0 = Date.now()
     const r = await act('timeout:race', async () => {
-      // Ignores signal, sleeps forever
+      // fn ignores the signal and just sleeps
       await sleep(500)
       return 'late'
     }, { timeout: { ms: 50 } })
 
     expect(r.ok).toBe(false)
-    expect(Date.now() - t0).toBeLessThan(200) // Returned well within 500ms
+    expect(Date.now() - t0).toBeLessThan(200)
   })
 
   it('per-attempt timeout resets on retry', async () => {
@@ -341,12 +336,12 @@ describe('timeout policy (fixes C-2: AbortSignal-based cancellation)', () => {
     const r = await act('timeout:retry-reset', async () => {
       calls++
       if (calls === 1) {
-        await sleep(200) // will time out
+        await sleep(200)
         return 'unreachable'
       }
       return 'recovered'
     }, {
-      retry: { attempts: 3, delayMs: 1 },
+      retry: { attempts: 3, delayMs: 1, shouldRetry: () => true },
       timeout: { ms: 50 },
     })
 
@@ -399,10 +394,9 @@ describe('totalTimeout policy (fixes C-1: cancels inner chain)', () => {
 
     expect(r.ok).toBe(false)
 
-    // Wait long enough that, pre-fix, additional attempts would have fired
+    // give any stray retries a window to fire if the cancellation wiring is broken
     await sleep(800)
-    // With the fix: only 1 attempt should fire (the first one is cancelled
-    // by totalTimeout before retry can start the second)
+    // first attempt is cancelled by totalTimeout before retry can start a second
     expect(attemptCount).toBe(1)
   })
 
@@ -418,10 +412,8 @@ describe('totalTimeout policy (fixes C-1: cancels inner chain)', () => {
     })
 
     expect(r.ok).toBe(false)
-    // Should return shortly after totalTimeout fires, not after the 1000ms delay
+    // first attempt fails, retry sleep starts, totalTimeout fires ~80ms in and rejects the sleep
     expect(Date.now() - t0).toBeLessThan(300)
-    // attemptCount: first attempt fails immediately, then delay starts,
-    // totalTimeout fires ~80ms in, retry sleep rejects, no second attempt
     expect(attemptCount).toBe(1)
   })
 })
@@ -443,7 +435,6 @@ describe('dedupe policy (fixes C-3 hung fn, C-5 shared meta)', () => {
 
     expect(calls).toBe(1)
     expect(results.every(r => r.ok)).toBe(true)
-    // All callers receive the same value
     const values = results.map(r => r.ok ? r.value : null)
     expect(new Set(values).size).toBe(1)
   })
@@ -464,7 +455,7 @@ describe('dedupe policy (fixes C-3 hung fn, C-5 shared meta)', () => {
 
     expect(a.ok).toBe(true)
     expect(b.ok).toBe(true)
-    // Both should report attempts: 3 (originator retried twice, succeeded on 3rd)
+    // originator retried twice, succeeded on 3rd; joiners inherit that count
     if (a.ok) expect(a.attempts).toBe(3)
     if (b.ok) expect(b.attempts).toBe(3)
   })
@@ -491,29 +482,29 @@ describe('dedupe policy (fixes C-3 hung fn, C-5 shared meta)', () => {
     let originatorResolve!: (v: string) => void
     const hungPromise = new Promise<string>((resolve) => { originatorResolve = resolve })
 
-    // Originator starts a hung fn
+    // originator starts a hung fn
     const originatorPromise = act('dedupe-test-hung', () => hungPromise, { dedupe: true })
 
-    // Give originator time to register the in-flight promise
+    // let the in-flight slot register before the joiner lands
     await sleep(20)
 
-    // Joiner arrives with their own AbortSignal
+    // joiner arrives with its own AbortSignal
     const joinerController = new AbortController()
     const joinerPromise = act('dedupe-test-hung', async () => 'fresh', {
       dedupe: true,
       signal: joinerController.signal,
     })
 
-    // Joiner aborts after 50ms — should reject quickly, not block forever
+    // joiner aborts after 50ms; should reject quickly instead of waiting on the hung originator
     setTimeout(() => joinerController.abort(new Error('joiner-cancelled')), 50)
     const t0 = Date.now()
     const joinerResult = await joinerPromise
     const elapsed = Date.now() - t0
 
     expect(joinerResult.ok).toBe(false)
-    expect(elapsed).toBeLessThan(300) // Returned well within hung originator's indefinite wait
+    expect(elapsed).toBeLessThan(300)
 
-    // Cleanup: resolve originator so the test can exit
+    // let the originator resolve so the test can exit
     originatorResolve('finally')
     const originatorResult = await originatorPromise
     expect(originatorResult.ok).toBe(true)
@@ -535,7 +526,7 @@ describe('dedupe policy (fixes C-3 hung fn, C-5 shared meta)', () => {
 
     expect(calls).toBe(2)
     if (a.ok && b.ok) {
-      // Each call captured its own myCall, so values are deterministic per key.
+      // each key got its own counter snapshot
       expect(a.value).toMatch(/^a-\d+$/)
       expect(b.value).toMatch(/^b-\d+$/)
     }
@@ -593,7 +584,7 @@ describe('dedupe policy (fixes C-3 hung fn, C-5 shared meta)', () => {
       meta: { attempts: 1, source: 'fresh' },
       signal: new AbortController().signal,
     })
-    // Without dedupe, async store is fine
+    // no dedupe here, so the async store is allowed
     expect(r).toBe('x')
   })
 })
@@ -646,7 +637,7 @@ describe('cache policy (fixes C-4 stampede, C-6 attempts=0, M-6 fail-open)', () 
 
     expect(r1.ok).toBe(false)
     expect(r2.ok).toBe(true)
-    expect(calls).toBe(2) // fn ran twice — failure was not cached
+    expect(calls).toBe(2) // failure wasn't cached, fn ran twice
   })
 
   it('prevents cache stampede for concurrent misses (fixes C-4)', async () => {
@@ -663,7 +654,7 @@ describe('cache policy (fixes C-4 stampede, C-6 attempts=0, M-6 fail-open)', () 
       ),
     )
 
-    // Pre-fix: 10 calls. Post-fix: 1 call (single-flight via in-flight slot).
+    // single-flight via the in-flight slot collapses 10 callers into 1 call
     expect(calls).toBe(1)
     expect(results.every(r => r.ok)).toBe(true)
     const values = results.map(r => r.ok ? r.value : null)
@@ -679,12 +670,12 @@ describe('cache policy (fixes C-4 stampede, C-6 attempts=0, M-6 fail-open)', () 
     expect(calls).toBe(1)
 
     await sleep(80) // past TTL
-    await act('cache-test-ttl', fn, { cache: { ttl: 50 } }) // miss
+    await act('cache-test-ttl', fn, { cache: { ttl: 50 } }) // miss, fn runs again
     expect(calls).toBe(2)
   })
 
   it('fails open when store.set throws (fixes M-6)', async () => {
-    // Custom store whose set() throws
+    // store whose set() throws
     const flakyStore: SyncStateStore = {
       _sync: true as const,
       get<T>(_key: string): T | undefined { return undefined },
@@ -702,7 +693,7 @@ describe('cache policy (fixes C-4 stampede, C-6 attempts=0, M-6 fail-open)', () 
       cache: { ttl: 60_000 },
     })
 
-    // Should still succeed — cache write failure is swallowed
+    // cache write failure is swallowed; the act still succeeds
     expect(r.ok).toBe(true)
     if (r.ok) expect(r.value).toBe('value')
   })
@@ -716,7 +707,7 @@ describe('invalidate() and withStore()', () => {
     await act('inv:basic', fn, { cache: { ttl: 60_000 } })
     expect(calls).toBe(1)
 
-    await act('inv:basic', fn, { cache: { ttl: 60_000 } }) // cache hit
+    await act('inv:basic', fn, { cache: { ttl: 60_000 } }) // hit
     expect(calls).toBe(1)
 
     expect(invalidate('inv:basic')).toBe(true) // cleared
@@ -739,7 +730,7 @@ describe('invalidate() and withStore()', () => {
     await act1('ws:iso', fn, { cache: { ttl: 60_000 } }) // hit
     expect(calls).toBe(1)
 
-    await act2('ws:iso', fn, { cache: { ttl: 60_000 } }) // different store, miss
+    await act2('ws:iso', fn, { cache: { ttl: 60_000 } }) // different store, fresh miss
     expect(calls).toBe(2)
 
     store1.destroy()
@@ -769,8 +760,7 @@ describe('invalidate() and withStore()', () => {
   })
 
   it('withStore with async store works for cache (no dedupe)', async () => {
-    // Closure-captured map (instead of `this._map`) so the object literal
-    // satisfies AsyncStateStore without excess-property violations.
+    // closure-captured map (not `this._map`) so the literal satisfies AsyncStateStore without excess-property noise
     const map = new Map<string, { value: unknown; expiresAt: number | null }>()
     const asyncStore: AsyncStateStore = {
       _sync: false as const,
@@ -809,7 +799,7 @@ describe('invalidate() and withStore()', () => {
 
     expect(r1.ok).toBe(true)
     expect(r2.ok).toBe(true)
-    expect(calls).toBe(1) // cache hit on second call
+    expect(calls).toBe(1) // second call hits cache
 
     const invalidateResult = await scopedAct.invalidate('ws:async')
     expect(invalidateResult).toBe(true)
@@ -828,7 +818,7 @@ describe('InMemoryStore LRU + maxSize (fixes P-3)', () => {
     store.set('c', 3)
     expect(store.size()).toBe(3)
 
-    store.set('d', 4) // evicts 'a' (oldest)
+    store.set('d', 4) // evicts 'a', the oldest
     expect(store.get('a')).toBeUndefined()
     expect(store.get('b')).toBe(2)
     expect(store.get('c')).toBe(3)
@@ -842,8 +832,8 @@ describe('InMemoryStore LRU + maxSize (fixes P-3)', () => {
     store.set('b', 2)
     store.set('c', 3)
 
-    store.get('a') // 'a' is now most recent
-    store.set('d', 4) // should evict 'b' (now oldest), not 'a'
+    store.get('a') // bump 'a' to most-recent
+    store.set('d', 4) // evicts 'b', now the oldest
 
     expect(store.get('a')).toBe(1)
     expect(store.get('b')).toBeUndefined()
@@ -855,7 +845,7 @@ describe('InMemoryStore LRU + maxSize (fixes P-3)', () => {
     const store = new InMemoryStore({ maxSize: 2 })
     store.set('a', 1)
     store.set('b', 2)
-    store.set('a', 10) // update, not add
+    store.set('a', 10) // update, not insert
 
     expect(store.get('a')).toBe(10)
     expect(store.get('b')).toBe(2)
@@ -879,9 +869,9 @@ describe('InMemoryStore LRU + maxSize (fixes P-3)', () => {
     store.set('a', 1)
     store.set('b', 2)
 
-    store.size() // should NOT refresh 'a' or 'b'
+    store.size() // must NOT touch LRU order
 
-    store.set('c', 3) // evicts oldest, which should still be 'a'
+    store.set('c', 3) // 'a' is still oldest, gets evicted
     expect(store.get('a')).toBeUndefined()
     expect(store.get('b')).toBe(2)
     expect(store.get('c')).toBe(3)
@@ -890,8 +880,7 @@ describe('InMemoryStore LRU + maxSize (fixes P-3)', () => {
   it('destroy() stops the cleanup timer (no leak)', () => {
     const store = new InMemoryStore({ autoCleanup: true, cleanupIntervalMs: 10 })
     store.destroy()
-    // If the timer wasn't cleared, the process would hang at exit.
-    // The test passing means destroy() worked.
+    // if destroy() didn't clear the timer, vitest would hang at exit
     expect(true).toBe(true)
   })
 })
@@ -942,7 +931,7 @@ describe('AbortSignal integration (fixes C-1, C-2, signal option)', () => {
     const r = await promise
 
     expect(r.ok).toBe(false)
-    expect(calls).toBe(1) // no retries after abort
+    expect(calls).toBe(1) // abort kills the retry loop
     if (!r.ok) expect((r.error as Error).message).toBe('cancel')
   })
 })
@@ -995,7 +984,7 @@ describe('execute() public API (fixes A-2)', () => {
       async size() { return 0 },
     }
 
-    // Build a dedupe policy manually
+    // build a dedupe policy by hand
     const { dedupePolicy } = await import('../policies/dedupe.js')
     const policy = dedupePolicy()
 

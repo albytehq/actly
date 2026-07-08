@@ -20,13 +20,11 @@ describe('BUG-D1: hedge timer leak', () => {
       hedge: { delayMs: 100 },
     })
 
-    // Wait beyond hedge delay to see if leaked timer fires
+    // Wait beyond hedge delay to see if a leaked timer fires.
     await wait(150)
 
-    // If timer leaked, it would have fired and tried to reject
-    // an already-settled promise. We can't directly observe this,
-    // but we can check that no unhandled rejection occurs.
-    // The test passes if no unhandledRejection event fires.
+    // If the timer leaked, it would try to reject an already-settled
+    // promise. The test passes if no unhandledRejection fires.
     expect(true).toBe(true)
   })
 })
@@ -44,11 +42,11 @@ describe('BUG-D2: hedge primary unhandled rejection', () => {
       const fn = async (signal: AbortSignal) => {
         primaryCallCount++
         if (primaryCallCount === 1) {
-          // Primary: slow, will eventually reject
+          // primary: slow, eventually rejects
           await wait(80)
           throw new Error('primary-failed')
         }
-        // Hedge: fast, succeeds
+        // hedge: fast, succeeds
         return 'hedge-success'
       }
 
@@ -62,7 +60,7 @@ describe('BUG-D2: hedge primary unhandled rejection', () => {
       // Wait for primary to eventually reject
       await wait(100)
 
-      // If bug exists: primary's rejection is unhandled → unhandledRejection fires
+      // primary's rejection must be swallowed; unhandledRejection stays false.
       expect(unhandledRejection).toBe(false)
     } finally {
       process.off('unhandledRejection', handler)
@@ -93,15 +91,14 @@ describe('BUG-D3: circuit breaker half-open concurrent probes', () => {
     // Wait for cooldown
     await wait(40)
 
-    // Fire 5 concurrent calls — only 1 should be allowed as probe
+    // Fire 5 concurrent calls; only 1 should be allowed as probe
     const results = await Promise.all(
       Array.from({ length: 5 }, () => act(key, fn, {
         circuitBreaker: { threshold: 3, cooldownMs: 30 },
       }))
     )
 
-    // Without fix: all 5 calls proceed (calls=5)
-    // With fix: only 1 call proceeds (calls=1), others get CircuitBreakerOpenError
+    // only 1 call proceeds; the other 4 get CircuitBreakerOpenError.
     expect(calls).toBe(1)
   })
 })
@@ -115,7 +112,7 @@ describe('BUG-D6: abort pool returns aborted controllers', () => {
     c1.abort(new Error('test-abort'))
     releaseController(c1)
 
-    // Acquire — should NOT get the aborted controller back
+    // Acquire; should not get the aborted controller back
     const c2 = acquireController()
     expect(c2.signal.aborted).toBe(false)
 
@@ -148,8 +145,8 @@ describe('BUG-D8: health check state isolation', () => {
 
     // Store A and B should have independent storeSize
     await act('d8-health-a:test', async () => 'a', { cache: { ttl: 60_000 } })
-    // Can't easily test store B independently since act() uses default store
-    // But we can verify the health check reads from the correct store
+    // Can't easily test store B independently since act() uses the default store,
+    // but the health check reads from the correct store.
     const statusA = healthA()
     const statusB = healthB()
 
@@ -189,11 +186,9 @@ describe('BUG-D9: drain scoped calls', () => {
 
 describe('BUG-D10: version references in comments', () => {
   it('source code should not reference v1.2.1 (version is 1.2.0)', async () => {
-    // Real static-analysis check, not a stub: walk src/ and fail if any
-    // file (other than this describe block's own label, which documents
-    // the defect by name) contains a "v1.2.1" string. package.json is the
-    // single source of truth for the version; nothing else should imply
-    // a version that was never published.
+    // Walks src/ and fails if any .ts file other than this test contains
+    // the literal "v1.2.1". package.json is the version source of truth;
+    // nothing else should imply a version that was never published.
     const { readdirSync, readFileSync, statSync } = await import('node:fs')
     const { join, dirname } = await import('node:path')
     const { fileURLToPath } = await import('node:url')
@@ -209,8 +204,8 @@ describe('BUG-D10: version references in comments', () => {
           continue
         }
         if (!full.endsWith('.ts')) continue
-        // This test file documents the defect by name (including the
-        // literal string "v1.2.1") — exclude it from its own scan.
+        // this test file documents the defect by name (including the
+        // literal "v1.2.1"); exclude it from its own scan.
         if (full.endsWith('hedge-circuit-bulkhead.test.ts')) continue
         const text = readFileSync(full, 'utf8')
         for (const line of text.split('\n')) {

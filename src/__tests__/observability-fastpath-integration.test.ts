@@ -6,7 +6,6 @@ const wait = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
 
 /**
  * Capture all observability events into an array for assertion.
- * Returns the hooks object + the events array.
  */
 function captureEvents(): { hooks: ObservabilityHooks; events: ActlyEvent[] } {
   const events: ActlyEvent[] = []
@@ -25,14 +24,14 @@ function captureEvents(): { hooks: ObservabilityHooks; events: ActlyEvent[] } {
 
 describe('Phase 11: observability hooks', () => {
   it('zero-cost contract: empty hooks object does NOT trigger observability', async () => {
-    // Empty hooks (no actual functions defined) should be treated as
-    // "no observability" — no events allocated, no overhead.
+    // Empty hooks (no actual functions defined) is treated as
+    // "no observability": no events allocated, no overhead.
     const r = await act('obs-empty:test', async () => 'value', {
       observability: {},
     })
     expect(r.ok).toBe(true)
-    // traceId should be undefined because buildObservability returns
-    // undefined when no hooks are actually defined.
+    // traceId is undefined because buildObservability returns undefined
+    // when no hooks are actually defined.
     expect(r.traceId).toBeUndefined()
   })
 
@@ -64,7 +63,7 @@ describe('Phase 11: observability hooks', () => {
     })
 
     expect(r.ok).toBe(true)
-    // Expected: 3 attempts, 2 retries, 1 final-success
+    // expected: 3 attempts, 2 retries, 1 final-success
     const types = events.map(e => e.type)
     expect(types).toEqual(['attempt', 'retry', 'attempt', 'retry', 'attempt', 'final-success'])
   })
@@ -122,7 +121,7 @@ describe('Phase 11: observability hooks', () => {
     const { hooks, events } = captureEvents()
     const controller = new AbortController()
     const promise = act('obs-abort:test', async (signal) => {
-      // Cooperative: wait for abort
+      // cooperative: wait for abort
       return new Promise<string>((_, reject) => {
         signal.addEventListener('abort', () => reject(signal.reason), { once: true })
       })
@@ -190,16 +189,14 @@ describe('Phase 11: observability hooks', () => {
   })
 
   it('observability hooks do not affect zero-hook fast path', async () => {
-    // When no observability is supplied, no events are allocated.
-    // Run 100 calls — should be fast.
+    // With no observability supplied, no events are allocated.
+    // 100 calls should stay well under 500ms; if observability overhead
+    // was incurred on the fast path, it would be much slower.
     const t0 = Date.now()
     for (let i = 0; i < 100; i++) {
       await act(`obs-fast-${i}`, async () => i)
     }
     const elapsed = Date.now() - t0
-    // 100 calls should take less than 500ms (very conservative).
-    // If observability overhead was incurred on the fast path, it would
-    // be much slower.
     expect(elapsed).toBeLessThan(500)
   })
 
@@ -235,10 +232,10 @@ describe('Phase 12: performance fast path', () => {
       expect(slow.source).toBe('fresh')
       expect(fast.attempts).toBe(1)
       expect(slow.attempts).toBe(1)
-      // Fast path: no traceId (no observability). Slow path: same (no obs).
+      // fast path: no traceId (no observability). Slow path: same (no obs).
       expect(fast.traceId).toBeUndefined()
       expect(slow.traceId).toBeUndefined()
-      // Both have durationMs (always set now)
+      // Both have durationMs (always set)
       expect(typeof fast.durationMs).toBe('number')
       expect(typeof slow.durationMs).toBe('number')
     }
@@ -289,8 +286,9 @@ describe('Phase 13: end-to-end integration', () => {
       expect(r.traceId).toBe('e2e-trace')
     }
 
-    // Events should include: attempt, retry, attempt, final-success
-    // (no cache-hit because first call, no cache-miss because dedupe first caller is originator not joiner)
+    // Events should include: attempt, retry, attempt, final-success.
+    // No cache-hit (first call) and no cache-miss (dedupe first caller is
+    // originator, not joiner).
     const types = events.map(e => e.type)
     expect(types).toContain('attempt')
     expect(types).toContain('retry')

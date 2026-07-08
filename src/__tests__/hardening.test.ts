@@ -328,12 +328,13 @@ describe('Health Check', () => {
 
   it('tracks inflight count', async () => {
     const store = new InMemoryStore({ maxSize: 100 })
-    const scopedAct = withStore(store)
+    // health is per-scope. createHealthCheck without a scope reads 'default',
+    // which is what act() (without withStore) writes to.
     const health = createHealthCheck(store)
 
     let resolveFn!: () => void
     const fnPromise = new Promise<void>(r => { resolveFn = r })
-    const promise = scopedAct('health-inflight:test', () => fnPromise)
+    const promise = act('health-inflight:test', () => fnPromise)
 
     await wait(10)
     const status = health()
@@ -341,7 +342,6 @@ describe('Health Check', () => {
 
     resolveFn()
     await promise
-    store.destroy()
   })
 })
 

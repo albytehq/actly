@@ -1,29 +1,19 @@
 // ─── Store interfaces ─────────────────────────────────────────────────────────
 
 /**
- * Synchronous key-value store. All operations complete in the same tick.
+ * Synchronous key-value store.
  *
- * # Why synchronous?
+ * `dedupePolicy` reads an in-flight Promise and writes a new one in the
+ * same synchronous frame; an async get() would let two callers both miss
+ * before either write lands, defeating deduplication. There's no JS lock
+ * that can paper over that - the constraint is structural.
  *
- * `dedupePolicy` must read an in-flight Promise from the store and, if absent,
- * write a new one — all within a single synchronous frame. If `get()` were
- * async, two concurrent callers could both observe a miss before either
- * write lands, defeating deduplication entirely. There is no lock primitive
- * in JavaScript that can paper over this: the constraint is structural, not
- * implementation-level.
+ * `readonly _sync: true` is a runtime tag execute() uses to enforce the
+ * dedupe constraint for plain-JS callers who bypass TypeScript. Set it as
+ * `true as const`; it's not part of the semantic contract.
  *
- * # The `_sync` discriminant
- *
- * `_sync: true` is a runtime tag that lets `execute()` enforce the dedupe
- * constraint for plain-JS callers who bypass TypeScript. It is NOT part of
- * the semantic contract and MUST NOT be used for anything beyond that guard.
- * Implementations must set it as a `readonly` literal (`true as const`).
- *
- * # Lifecycle
- *
- * Implementations that hold background resources (timers, connections) should
- * expose a `destroy()` method as a convention. See `InMemoryStore` for the
- * reference pattern.
+ * Implementations holding background resources (timers, connections)
+ * should expose a `destroy()`. See InMemoryStore for the reference pattern.
  */
 export interface SyncStateStore {
   /** Runtime discriminant. Must be `true as const`. */
@@ -35,39 +25,42 @@ export interface SyncStateStore {
   has(key: string): boolean
 
   /**
-   * Remove all entries synchronously.
-   * After `clear()` returns, `size()` returns 0.
+   * Atomically delete `key` if it exists. Returns true if removed.
+   *
+   * Optional - implementations with a native atomic delete-and-return
+   * (e.g. Redis DEL) should override this. The default fallback in
+   * withStore's invalidate() uses has()+delete() which has a TOCTOU race.
    */
+  deleteIfExists?(key: string): boolean
+
+  /** Remove all entries synchronously. */
   clear(): void
 
   /**
-   * Return the count of live (non-expired) entries.
-   * Side-effect free: does not mutate the store. Implementations MAY evict
-   * expired entries opportunistically during this call, but MUST NOT have
-   * observable side effects beyond internal cleanup.
+   * Count of live (non-expired) entries. Side-effect free apart from
+   * optional opportunistic eviction of expired entries.
    */
   size(): number
+
+  /**
+   * Release internal resources (timers, connections, listeners). Safe to
+   * call multiple times. Optional - omit only when the store holds no
+   * background resources.
+   */
+  destroy?(): void
 }
 
 /**
  * Asynchronous key-value store. All operations return Promises.
  *
- * # Policy compatibility
+ * Compatible with `cachePolicy` only - passing an AsyncStateStore to a
+ * chain with `dedupePolicy` is a runtime error. See SyncStateStore for
+ * why dedupe requires synchronous access.
  *
- * Compatible with `cachePolicy` only. Passing an `AsyncStateStore` to a
- * policy chain that includes `dedupePolicy` is a TypeScript error and a
- * runtime error — `execute()` throws at chain-build time. See
- * `SyncStateStore` for why dedupe requires synchronous access.
+ * The store is responsible for honouring `ttlMs`; actly passes it as a
+ * hint. Implementations may delegate to a native TTL (e.g. Redis EXPIRE).
  *
- * # TTL semantics
- *
- * The store is responsible for honouring `ttlMs`. Actly passes it as a hint.
- * Implementations may delegate to a native TTL mechanism (e.g. Redis EXPIRE).
- *
- * # The `_sync` discriminant
- *
- * `_sync: false` mirrors the discriminant on `SyncStateStore`. Must be set
- * as a `readonly` literal (`false as const`).
+ * `readonly _sync: false` mirrors the discriminant on SyncStateStore.
  */
 export interface AsyncStateStore {
   /** Runtime discriminant. Must be `false as const`. */
@@ -78,18 +71,30 @@ export interface AsyncStateStore {
   delete(key: string): Promise<void>
   has(key: string): Promise<boolean>
 
+  /**
+   * Atomically delete `key` if it exists. Returns true if removed.
+   * Optional - see SyncStateStore.deleteIfExists.
+   */
+  deleteIfExists?(key: string): Promise<boolean>
+
   /** Remove all entries managed by this store. */
   clear(): Promise<void>
 
-  /** Return the count of live (non-expired) entries. */
+  /** Count of live (non-expired) entries. */
   size(): Promise<number>
+
+  /**
+   * Release internal resources. Safe to call multiple times. Optional -
+   * omit only when the store holds no background resources.
+   */
+  destroy?(): void | Promise<void>
 }
 
 // ─── Type guards ──────────────────────────────────────────────────────────────
 
 /**
- * Narrows `AnyStateStore` to `SyncStateStore` via the `_sync` discriminant.
- * Used by `execute()` and `cachePolicy` to branch between sync and async paths.
+ * Narrows to SyncStateStore via the `_sync` discriminant. Used by
+ * execute() and cachePolicy to branch sync vs async paths.
  */
 export function isSyncStore(
   store: SyncStateStore | AsyncStateStore,
@@ -98,8 +103,8 @@ export function isSyncStore(
 }
 
 /**
- * Narrows `AnyStateStore` to `AsyncStateStore` via the `_sync` discriminant.
- * Provided for symmetry; prefer `isSyncStore` for the common guard pattern.
+ * Narrows to AsyncStateStore. Provided for symmetry; prefer isSyncStore
+ * for the common guard pattern.
  */
 export function isAsyncStore(
   store: SyncStateStore | AsyncStateStore,
