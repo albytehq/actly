@@ -1,50 +1,30 @@
 // ─── Primary API ──────────────────────────────────────────────────────────────
 
-export {
-  act,
-  invalidate,
-  withStore,
-} from './core/act.js'
-
-export type {
-  ScopedActSync,
-  ScopedActAsync,
-} from './core/act.js'
-
-// HedgeTimeoutError lives in errors.ts; re-exported here so callers have a
-// single consistent error hierarchy.
-export {
-  HedgeTimeoutError,
-} from './errors.js'
+export { act, invalidate, withStore } from './core/act.js'
+export type { ScopedActSync, ScopedActAsync } from './core/act.js'
 
 // ─── Execution engine (for custom policy chains) ──────────────────────────────
 
-export {
-  execute,
-  REQUIRES_SYNC_STORE,
-} from './core/executor.js'
+export { execute, REQUIRES_SYNC_STORE } from './core/executor.js'
+export type { ExecutorInput } from './core/executor.js'
 
-// Export the execute() input type so custom policy authors don't have to
-// reach for `Parameters<typeof execute>[0]`.
-export type {
-  ExecutorInput,
-} from './core/executor.js'
+// ─── Policy factories (public since 1.4 — build custom chains with execute) ─
 
-// Re-export ObservabilityContext so callers can type the context object
-// they read from `PolicyContext.observability`.
-export type {
-  ObservabilityContext,
-} from './observability.js'
+export { retryPolicy } from './policies/retry.js'
+export { timeoutPolicy, totalTimeoutPolicy } from './policies/timeout.js'
+export { dedupePolicy } from './policies/dedupe.js'
+export { cachePolicy } from './policies/cache.js'
+export { circuitBreakerPolicy } from './policies/circuitBreaker.js'
+export { bulkheadPolicy } from './policies/bulkhead.js'
+export { rateLimitPolicy } from './policies/rateLimit.js'
+export { noopPolicy } from './policies/noop.js'
+export { computeDelay } from './backoff.js'
 
 // ─── Stores ───────────────────────────────────────────────────────────────────
 
 export { InMemoryStore } from './stores/memory.js'
 export type { InMemoryStoreOptions } from './stores/memory.js'
-
-export {
-  isSyncStore,
-  isAsyncStore,
-} from './stores/base.js'
+export { isSyncStore, isAsyncStore } from './stores/contract.js'
 
 // ─── Error classes ────────────────────────────────────────────────────────────
 
@@ -55,11 +35,21 @@ export {
   TotalTimeoutError,
   RetryExhaustedError,
   ValidationError,
+  HedgeTimeoutError,
+  CircuitBreakerOpenError,
+  BulkheadOverflowError,
+  RateLimitError,
+  ResourceExhaustedError,
   isActlyError,
+  sanitizeError,
+  sanitizeErrorMessage,
 } from './errors.js'
 
-// ─── Observability ───────────────────────────────────────────────────────────
+// ─── Observability ────────────────────────────────────────────────────────────
 
+export { OBSERVABILITY_HOOKS } from './observability.js'
+export type { ObservabilityHookName } from './observability.js'
+export type { ObservabilityContext } from './observability.js'
 export type {
   ActlyEventType,
   ActlyEventBase,
@@ -80,33 +70,33 @@ export type {
 // ─── Public types ─────────────────────────────────────────────────────────────
 
 export type {
-  // Function & result shapes
   ActFn,
   ActResult,
   ActSuccess,
   ActFailure,
   ActSource,
   ActOptions,
-
-  // Policy options
   RetryOptions,
   TimeoutOptions,
   DedupeOptions,
   CacheOptions,
-
-  // Policy internals (for custom policy authors)
   PolicyApplier,
   PolicyContext,
   RunMeta,
-
-  // Store types
-  StateStore,        // alias for SyncStateStore (backwards compat)
+  StateStore,
   SyncStateStore,
   AsyncStateStore,
   AnyStateStore,
-} from './types/index.js'
+  CircuitBreakerOptions,
+  BulkheadOptions,
+  RateLimitOptions,
+  HedgeOptions,
+  FallbackOptions,
+  AuditOptions,
+  AuditEntry,
+} from './types.js'
 
-// ─── Utilities (for custom policy authors) ────────────────────────────────────
+// ─── Cancellation utilities ───────────────────────────────────────────────────
 
 export {
   anySignal,
@@ -114,31 +104,15 @@ export {
   sleep,
   linkSignal,
   isAbortError,
-} from './utils/abort.js'
+} from './abort.js'
 
-export {
-  sanitizeKey,
-} from './utils/key.js'
+// ─── Validation ───────────────────────────────────────────────────────────────
 
-export {
-  computeDelay,
-} from './utils/backoff.js'
+export { sanitizeKey } from './keys.js'
+export { LIMITS } from './limits.js'
+export type { Limits } from './limits.js'
 
-export {
-  LIMITS,
-} from './utils/limits.js'
-
-export type { Limits } from './utils/limits.js'
-
-// ─── Hardening: new error classes ────────────────────────────────────────────
-
-export {
-  CircuitBreakerOpenError,
-  BulkheadOverflowError,
-  RateLimitError,
-  ResourceExhaustedError,
-} from './errors.js'
-// ─── Hardening: health check & graceful shutdown ─────────────────────────────
+// ─── Health check & graceful shutdown ─────────────────────────────────────────
 
 export {
   createHealthCheck,
@@ -149,54 +123,23 @@ export {
 } from './core/health.js'
 export type { HealthStatus, HealthCheckFn } from './core/health.js'
 
-export {
-  drain,
-  drainAll,
-} from './core/shutdown.js'
+export { drain, drainAll } from './core/shutdown.js'
 
-// ─── Hardening: tenant isolation ─────────────────────────────────────────────
+// ─── Tenant isolation ─────────────────────────────────────────────────────────
 
-export {
-  createTenantStore,
-  createAsyncTenantStore,
-} from './core/tenant.js'
+export { createTenantStore, createAsyncTenantStore } from './core/tenant.js'
 export type { TenantStoreOptions, TenantManager } from './core/tenant.js'
 
-// ─── Hardening: error sanitization ───────────────────────────────────────────
+// ─── Decorator ────────────────────────────────────────────────────────────────
 
-export {
-  sanitizeErrorMessage,
-  sanitizeError,
-} from './utils/sanitize.js'
+export { usePolicy } from './usePolicy.js'
 
-// ─── Hardening: AbortController pool ─────────────────────────────────────────
+// ─── Deprecated: AbortController pool ─────────────────────────────────────────
+// The fast path uses a shared never-aborted signal; the pool has no
+// internal use since 1.4 and will be removed in 2.0.
 
 export {
   acquireController,
   releaseController,
   poolSize,
-} from './utils/abortPool.js'
-
-// ─── Hardening: policy types ─────────────────────────────────────────────────
-
-export type {
-  CircuitBreakerOptions,
-  BulkheadOptions,
-  RateLimitOptions,
-  HedgeOptions,
-  FallbackOptions,
-  AuditOptions,
-  AuditEntry,
-} from './types/index.js'
-
-// ─── Hardening: noop policy (Cockatiel parity, useful for testing) ───────────
-
-export {
-  noopPolicy,
-} from './policies/noop.js'
-
-// ─── Hardening: @usePolicy decorator (Cockatiel parity) ─────────────────────
-
-export {
-  usePolicy,
-} from './utils/decorator.js'
+} from './abort.js'

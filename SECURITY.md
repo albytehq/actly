@@ -4,6 +4,7 @@
 
 | Version | Supported |
 |---|---|
+| 1.4.x | Yes |
 | 1.3.x | Yes |
 | 1.2.x | Security fixes only |
 | < 1.2 | No |
@@ -47,10 +48,13 @@ Include in your report:
 - Error sanitisation: HTML entity escaping and control char stripping for audit logs
 - Per-tenant store isolation via `createTenantStore()`
 - Audit logging: every `act()` call logged with key, traceId, result, timestamp
+- Observability hook-name validation (since 1.4): typos throw instead of silently dropping telemetry
+
+`isActlyError(e)` is a heuristic predicate, not an authentication boundary: it checks for an Error-shaped object carrying one of the known `ACTLY_*` code strings. A deliberately forged `{ code, message }` object cannot be distinguished from a real actly error — codes are part of the public contract. Treat it as a convenience for telemetry grouping, never as a trust boundary.
 
 ## Dependency policy
 
 - Zero runtime dependencies
-- DevDependencies kept minimal (typescript, vitest, @types/node)
+- DevDependencies kept minimal (typescript, vitest, esbuild for bundling, @types/node)
 - `npm audit` must pass before release
 - `package-lock.json` committed for reproducible installs

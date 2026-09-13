@@ -1,3 +1,67 @@
+# Migration Guide
+
+## v1.3.0 → v1.4
+
+One intentional contract change (validation now throws synchronously), a strictness change for standalone policy factories, two deprecations, and a distribution change. Everything else is fixes and speed.
+
+### 1. Validation throws synchronously
+
+`act()` (and scoped `act()`) now throw **synchronously** for programmer errors — invalid keys, invalid options, unknown observability hook names — instead of returning a rejected promise. Runtime failures still always resolve to `ActResult`. README 1.3.0 already documented this as the intended contract; the implementation finally matches.
+
+```ts
+// before (1.3 actual behavior): rejected promise
+await act('k', fn, { retry: { attempts: 0 } }).catch(handle) // .catch never ran
+
+// after: sync throw at the call site
+try {
+  await act('k', fn, { retry: { attempts: 1 } }) // valid
+} catch (e) {
+  // never reached for runtime errors — only for invalid input
+}
+```
+
+If you called `.catch()` on `act()` specifically to handle validation errors, wrap the call in `try/catch` instead.
+
+### 2. Hedge winner is no longer aborted (the fix you were promised in 1.3.0)
+
+On the default `outside-retry` placement, v1.3.0 still aborted the winner's controller after the race settled, cancelling live downstream work. If you worked around it (checking `signal.aborted` after resolve, or forcing `placement: 'inside-retry'`), remove the workaround.
+
+### 3. Distribution: real CJS, no deep files
+
+- `require('actly')` now works on every Node 20+ (v1.3 required Node 22.12+/20.19+ via `require(esm)`).
+- `dist/` contains two single-file bundles (`index.js`, `index.cjs`) plus per-module `.d.ts` files. Deep imports like `require('actly/dist/core/act.js')` (never part of the `exports` map) no longer resolve — import from `'actly'`.
+- Tarball 84 → 66.1 KB; unpacked 400 → 209 KB; package files 152 → 43 (dist 37).
+
+### 4. Deprecated (still working, removal in 2.0)
+
+- `retry.shouldRetryResult` → `retry.acceptResult` (same semantics, non-inverted name).
+- `acquireController` / `releaseController` / `poolSize` — the fast path uses a shared never-aborted signal; the pool has no internal use.
+
+### 5. Stricter `isActlyError`
+
+Plain objects that merely carry an `ACTLY_*`-prefixed `code` no longer match. Real actly errors (any realm) and Error-shaped objects with a known code still match.
+
+### 6. `createHealthCheck` accepts any store
+
+The parameter type widened from the concrete `InMemoryStore` class to the store contract. Async stores report `storeSize: -1`.
+
+### 7. Standalone policy factories validate (previously silent coercion)
+
+`retryPolicy`, `timeoutPolicy`, `totalTimeoutPolicy`, `cachePolicy`, `dedupePolicy`, `rateLimitPolicy`, and `circuitBreakerPolicy` now throw at construction for the same invalid options `act()` always rejected. Code that "worked" only because invalid values were silently coerced will now throw:
+
+```ts
+// before: silently became 1 attempt
+const p = retryPolicy({ attempts: 0 })   // RangeError now
+// before: setTimeout clamped ms: Infinity to a 1 ms fire
+const t = timeoutPolicy({ ms: Infinity }) // RangeError now
+// before: ttl: 0 meant "never expires" in the store layer
+const c = cachePolicy({ ttl: 0 })        // RangeError now
+```
+
+`enableWatchdog(NaN)` / `enableWatchdog(Infinity)` likewise throw instead of creating a 1 ms busy interval. All of these were programmer errors with silent misbehavior before; if your code throws now, it was already broken.
+
+---
+
 # Migration Guide: v1.2.0 to v1.3.0
 
 Six breaking changes. If you only use `retry` / `timeout` / `totalTimeout` / `dedupe` / `cache` and don't inspect error types on exhausted retries, you probably don't need to change anything.
@@ -96,6 +160,8 @@ await act('k', fn, { dedupe: { inflightTtl: Infinity } })
 ## 6. `observability` shape is validated
 
 Previously typos in hook names (`onFinalSucess` instead of `onFinalSuccess`) were silently ignored. You thought you were observing but weren't. Now unknown keys throw `ValidationError` at call time.
+
+> **Honesty note:** this validation was *claimed* in the 1.3.0 release notes but not actually implemented — 1.3.0 silently ignored typos exactly like 1.2.0 did. The validation exists and is regression-tested since 1.4.
 
 ```ts
 // old: typo silently ignored

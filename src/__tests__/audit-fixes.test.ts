@@ -249,18 +249,18 @@ describe('Audit-fix regressions', () => {
   // BUG-D-005: circuitBreaker.countThreshold NaN passed validation.
   describe('BUG-D-005: countThreshold NaN rejected', () => {
     it('countThreshold: NaN throws RangeError', async () => {
-      await expect(act('d005-nan', async () => 'ok', {
+      expect(() => act('d005-nan', async () => 'ok', {
         circuitBreaker: { threshold: 3, cooldownMs: 1000, strategy: 'count', countThreshold: NaN },
-      })).rejects.toThrow(/countThreshold/)
+      })).toThrow(/countThreshold/)
     })
   })
 
   // BUG-D-004: dedupe inflightTtl: 0 silently accepted.
   describe('BUG-D-004: dedupe inflightTtl: 0 rejected', () => {
     it('inflightTtl: 0 throws RangeError', async () => {
-      await expect(act('d004-zero', async () => 'ok', {
+      expect(() => act('d004-zero', async () => 'ok', {
         dedupe: { enabled: true, inflightTtl: 0 },
-      })).rejects.toThrow(/inflightTtl must be > 0/)
+      })).toThrow(/inflightTtl must be > 0/)
     })
   })
 
@@ -282,37 +282,37 @@ describe('Audit-fix regressions', () => {
   // BUG-D-013: key.ts prototype blocklist missed Object.prototype method names.
   describe('BUG-D-013: expanded prototype pollution blocklist', () => {
     it('rejects hasOwnProperty as a key', async () => {
-      await expect(act('hasOwnProperty', async () => 'ok')).rejects.toThrow(/forbidden/)
+      expect(() => act('hasOwnProperty', async () => 'ok')).toThrow(/forbidden/)
     })
     it('rejects toString as a key', async () => {
-      await expect(act('toString', async () => 'ok')).rejects.toThrow(/forbidden/)
+      expect(() => act('toString', async () => 'ok')).toThrow(/forbidden/)
     })
     it('rejects valueOf as a key', async () => {
-      await expect(act('valueOf', async () => 'ok')).rejects.toThrow(/forbidden/)
+      expect(() => act('valueOf', async () => 'ok')).toThrow(/forbidden/)
     })
   })
 
   // BUG-D-011: no upper-bound limits on countSize, maxConcurrent, maxCalls.
   describe('BUG-D-011: upper-bound limits enforced', () => {
     it('rejects countSize > MAX_CIRCUIT_BREAKER_WINDOW', async () => {
-      await expect(act('d011-cbsize', async () => 'ok', {
+      expect(() => act('d011-cbsize', async () => 'ok', {
         circuitBreaker: {
           threshold: 3, cooldownMs: 1000, strategy: 'count',
           countSize: LIMITS.MAX_CIRCUIT_BREAKER_WINDOW + 1,
         },
-      })).rejects.toThrow(/countSize.*exceeds limit/)
+      })).toThrow(/countSize.*exceeds limit/)
     })
 
     it('rejects maxConcurrent > MAX_BULKHEAD_CONCURRENCY', async () => {
-      await expect(act('d011-bulk', async () => 'ok', {
+      expect(() => act('d011-bulk', async () => 'ok', {
         bulkhead: { maxConcurrent: LIMITS.MAX_BULKHEAD_CONCURRENCY + 1 },
-      })).rejects.toThrow(/maxConcurrent.*exceeds limit/)
+      })).toThrow(/maxConcurrent.*exceeds limit/)
     })
 
     it('rejects maxCalls > MAX_RATE_LIMIT_CALLS', async () => {
-      await expect(act('d011-rl', async () => 'ok', {
+      expect(() => act('d011-rl', async () => 'ok', {
         rateLimit: { maxCalls: LIMITS.MAX_RATE_LIMIT_CALLS + 1, windowMs: 1000 },
-      })).rejects.toThrow(/maxCalls.*exceeds limit/)
+      })).toThrow(/maxCalls.*exceeds limit/)
     })
   })
 

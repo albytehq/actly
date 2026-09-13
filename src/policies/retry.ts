@@ -1,21 +1,20 @@
-import type { ActFn, PolicyApplier, PolicyContext, RetryOptions } from '../types/index.js'
-import { computeDelay } from '../utils/backoff.js'
-import { isAbortError, sleep } from '../utils/abort.js'
-import { safeCall } from '../utils/safeCall.js'
+import type { ActFn, PolicyApplier, PolicyContext, RetryOptions } from '../types.js'
+import { computeDelay } from '../backoff.js'
+import { isAbortError, sleep } from '../abort.js'
+import { safeCall } from '../safeCall.js'
+import { fillAttemptOutcome, type AttemptEvent } from '../observability.js'
+import { assertRetryOptions } from '../validate.js'
 import { RetryExhaustedError } from '../errors.js'
-import { LIMITS } from '../utils/limits.js'
-
-// ─── Default predicate ────────────────────────────────────────────────────────
+import { LIMITS } from '../limits.js'
 
 /**
- * Default `shouldRetry`: retry on any error except aborts and per-attempt
- * `TimeoutError`. Retrying an abort just aborts again; retrying a slow
- * endpoint that always times out multiplies wall-clock latency by `attempts`.
- * Override with `shouldRetry: () => true` to retry on timeouts.
+ * Default `shouldRetry`: retry every error except aborts and actly timeout
+ * codes. Retrying an abort re-aborts; retrying a per-attempt timeout
+ * multiplies wall-clock latency by `attempts`. Override with
+ * `shouldRetry: () => true` to retry timeouts.
  */
 function defaultShouldRetry(error: unknown, _attempt: number): boolean {
   if (isAbortError(error)) return false
-  // .code string check survives cross-realm boundary loss
   if (typeof error === 'object' && error !== null) {
     const code = (error as { code?: string }).code
     if (code === 'ACTLY_TIMEOUT' || code === 'ACTLY_TOTAL_TIMEOUT') return false
@@ -23,34 +22,32 @@ function defaultShouldRetry(error: unknown, _attempt: number): boolean {
   return true
 }
 
-// ─── Policy ───────────────────────────────────────────────────────────────────
-
 /**
- * Retry `fn` up to `opts.attempts` times on retryable errors. Writes the
- * live attempt count into `ctx.meta.attempts`.
+ * Retry `fn` up to `opts.attempts` times on retryable errors; writes the
+ * live attempt count into `ctx.meta.attempts`. Checks `parentSignal.aborted`
+ * before each attempt so totalTimeout or caller cancel bails immediately;
+ * backoff sleeps are signal-aware.
  *
- * Before each attempt, checks `parentSignal.aborted` so a `totalTimeout`
- * or caller cancel bails immediately. Backoff sleeps are also signal-aware.
+ * `shouldRetry` runs after every failure (including the last) so observers
+ * see one call per attempt; the return value is only consulted when another
+ * attempt remains.
  *
- * `shouldRetry` is called after every failure (including the last) so
- * observers see one call per attempt; the return value is only consulted
- * when `attempt < max`. Omitting it uses `defaultShouldRetry`.
+ * Options are validated at construction (since 1.4) — the same rules as
+ * `act()` — so direct `execute()` users cannot silently get `attempts: 0`
+ * coerced to 1.
  */
 export function retryPolicy<T>(opts: RetryOptions): PolicyApplier<T> {
-  const max = Math.max(1, Math.floor(opts.attempts))
+  assertRetryOptions(opts)
+  const max = opts.attempts
   const shouldRetry = opts.shouldRetry ?? defaultShouldRetry
-  const shouldRetryResult = opts.shouldRetryResult
-  // unref the sleep timer so CLI/test processes can exit mid-retry
+  const acceptResult = opts.acceptResult ?? opts.shouldRetryResult
   const dangerouslyUnref = opts.dangerouslyUnref === true
   const sleepOpts = dangerouslyUnref ? { unref: true } : undefined
-  // backoffFn overrides backoff + jitter; state persists across attempts
-  // in this call only.
   const backoffFn = opts.backoffFn
 
   return (fn: ActFn<T>, ctx: PolicyContext): ActFn<T> =>
     async (parentSignal: AbortSignal) => {
       const backoffState: Record<string, unknown> = {}
-      // lazy errors[] - happy path allocates nothing
       let errors: unknown[] | undefined
       let retriedAtLeastOnce = false
       const obs = ctx.observability
@@ -59,27 +56,31 @@ export function retryPolicy<T>(opts: RetryOptions): PolicyApplier<T> {
         if (parentSignal.aborted) throw parentSignal.reason
 
         ctx.meta.attempts = attempt
-        const attemptStart = Date.now()
+
+        // Filled after the attempt settles (durationMs, error on failure).
+        let attemptEvent: AttemptEvent | undefined
+        if (obs) {
+          attemptEvent = {
+            type: 'attempt', key: ctx.key, traceId: obs.traceId,
+            timestamp: Date.now(), attempt,
+          }
+          safeCall(obs.hooks.onAttempt, attemptEvent)
+        }
+        const attemptStart = attemptEvent !== undefined ? attemptEvent.timestamp : 0
 
         try {
-          // emit before the attempt so observers can track in-flight calls
-          if (obs) {
-            safeCall(obs.hooks.onAttempt, {
-              type: 'attempt', key: ctx.key, traceId: obs.traceId,
-              timestamp: attemptStart, attempt,
-            })
-          }
           const value = await fn(parentSignal)
 
-          // shouldRetryResult: inspect a non-throwing return (e.g. fetch 500)
-          // and decide whether to retry.
-          if (shouldRetryResult) {
+          if (attemptEvent !== undefined) {
+            fillAttemptOutcome(attemptEvent, Date.now() - attemptStart, undefined)
+          }
+
+          if (acceptResult) {
             let accept: boolean
             try {
-              const raw = shouldRetryResult(value, attempt)
-              // an async predicate accidentally returns a Promise (truthy) -
-              // treat non-boolean returns as "accept" so predicate bugs
-              // surface the original value rather than looping forever.
+              const raw = acceptResult(value, attempt)
+              // non-boolean returns (e.g. an async predicate leaking a
+              // Promise) count as accept so the value surfaces, not a loop
               accept = typeof raw === 'boolean' ? raw : true
             } catch {
               return value
@@ -87,20 +88,12 @@ export function retryPolicy<T>(opts: RetryOptions): PolicyApplier<T> {
             if (accept) return value
 
             const syntheticError = new Error(
-              `Actly: shouldRetryResult returned false on attempt ${attempt}`,
+              `Actly: acceptResult returned false on attempt ${attempt}`,
             )
             if (errors === undefined) errors = []
-            if (errors.length < 10) {
-              errors.push(syntheticError)
-            } else {
-              errors.shift()
-              errors.push(syntheticError)
-            }
+            if (errors.length < 10) errors.push(syntheticError)
+            else { errors.shift(); errors.push(syntheticError) }
 
-            // Exhausted retries on a predicate-rejected value: return the
-            // last value (caller asked to retry, not to throw). Emit onRetry
-            // with the synthetic error so dashboards distinguish this from
-            // a clean accept.
             if (attempt >= max) {
               if (obs) {
                 safeCall(obs.hooks.onRetry, {
@@ -115,20 +108,8 @@ export function retryPolicy<T>(opts: RetryOptions): PolicyApplier<T> {
             retriedAtLeastOnce = true
             if (parentSignal.aborted) throw parentSignal.reason
 
-            // backoffFn overrides computeDelay; if it throws, fall back to
-            // computeDelay so a buggy fn doesn't mask the original error.
-            // NaN poisons Math.min/max - clamp to 0 so a buggy backoffFn
-            // can't silently disable backoff.
-            let rawDelay: number
-            try {
-              rawDelay = backoffFn
-                ? backoffFn(attempt, syntheticError, backoffState)
-                : computeDelay(attempt, opts)
-            } catch {
-              rawDelay = computeDelay(attempt, opts)
-            }
-            const safeDelay = Number.isFinite(rawDelay) ? rawDelay : 0
-            const delay = Math.min(Math.max(0, safeDelay), LIMITS.MAX_RETRY_DELAY_MS)
+            const delay = computeSafeDelay(() =>
+              backoffFn ? backoffFn(attempt, syntheticError, backoffState) : computeDelay(attempt, opts))
             if (obs) {
               safeCall(obs.hooks.onRetry, {
                 type: 'retry', key: ctx.key, traceId: obs.traceId,
@@ -142,16 +123,13 @@ export function retryPolicy<T>(opts: RetryOptions): PolicyApplier<T> {
 
           return value
         } catch (err) {
-          if (errors === undefined) errors = []
-          // cap at 10 - recent errors are the useful ones
-          if (errors.length < 10) {
-            errors.push(err)
-          } else {
-            errors.shift()
-            errors.push(err)
+          if (attemptEvent !== undefined) {
+            fillAttemptOutcome(attemptEvent, Date.now() - attemptStart, err)
           }
+          if (errors === undefined) errors = []
+          if (errors.length < 10) errors.push(err)
+          else { errors.shift(); errors.push(err) }
 
-          // predicate throws: surface the original fn error, not the bug
           let retryable: boolean
           try {
             retryable = shouldRetry(err, attempt)
@@ -177,21 +155,8 @@ export function retryPolicy<T>(opts: RetryOptions): PolicyApplier<T> {
 
           if (parentSignal.aborted) throw parentSignal.reason
 
-          // backoffFn overrides computeDelay; if it throws, fall back to
-          // computeDelay so a buggy fn doesn't mask the original error.
-          // NaN poisons Math.min/max - clamp to 0 so a buggy backoffFn
-          // can't silently disable backoff.
-          let rawDelay: number
-          try {
-            rawDelay = backoffFn
-              ? backoffFn(attempt, err, backoffState)
-              : computeDelay(attempt, opts)
-          } catch {
-            rawDelay = computeDelay(attempt, opts)
-          }
-          const safeDelay = Number.isFinite(rawDelay) ? rawDelay : 0
-          const delay = Math.min(Math.max(0, safeDelay), LIMITS.MAX_RETRY_DELAY_MS)
-
+          const delay = computeSafeDelay(() =>
+            backoffFn ? backoffFn(attempt, err, backoffState) : computeDelay(attempt, opts))
           if (obs) {
             safeCall(obs.hooks.onRetry, {
               type: 'retry', key: ctx.key, traceId: obs.traceId,
@@ -205,7 +170,20 @@ export function retryPolicy<T>(opts: RetryOptions): PolicyApplier<T> {
         }
       }
 
-      // only reachable if max attempts was 0 - validation prevents it
+      // unreachable: validation guarantees attempts >= 1
       throw new Error('Actly: retryPolicy reached unreachable state')
     }
+}
+
+// NaN poisons Math.min/max and a buggy backoffFn must not disable backoff:
+// clamp non-finite results to 0, cap at MAX_RETRY_DELAY_MS.
+function computeSafeDelay(compute: () => number): number {
+  let rawDelay: number
+  try {
+    rawDelay = compute()
+  } catch {
+    rawDelay = 0
+  }
+  const safeDelay = Number.isFinite(rawDelay) ? rawDelay : 0
+  return Math.min(Math.max(0, safeDelay), LIMITS.MAX_RETRY_DELAY_MS)
 }

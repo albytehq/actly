@@ -9,59 +9,45 @@ describe('BUG-D20: hardening options not validated', () => {
   it('circuitBreaker.threshold = -5 should throw, not silently coerce', async () => {
     // without validation: Math.max(1, Math.floor(-5)) = 1, silently coerced.
     // validation throws RangeError instead.
-    await expect(
-      act('d20-cb:test', async () => 'ok', {
+    expect(() => act('d20-cb:test', async () => 'ok', {
         circuitBreaker: { threshold: -5, cooldownMs: 1000 },
-      })
-    ).rejects.toThrow(/threshold/)
+      })).toThrow(/threshold/)
   })
 
   it('circuitBreaker.cooldownMs = 0 should throw', async () => {
-    await expect(
-      act('d20-cb2:test', async () => 'ok', {
+    expect(() => act('d20-cb2:test', async () => 'ok', {
         circuitBreaker: { threshold: 3, cooldownMs: 0 },
-      })
-    ).rejects.toThrow(/cooldownMs/)
+      })).toThrow(/cooldownMs/)
   })
 
   it('bulkhead.maxConcurrent = 0 should throw', async () => {
-    await expect(
-      act('d20-bulk:test', async () => 'ok', {
+    expect(() => act('d20-bulk:test', async () => 'ok', {
         bulkhead: { maxConcurrent: 0 },
-      })
-    ).rejects.toThrow(/maxConcurrent/)
+      })).toThrow(/maxConcurrent/)
   })
 
   it('rateLimit.maxCalls = -1 should throw', async () => {
-    await expect(
-      act('d20-rl:test', async () => 'ok', {
+    expect(() => act('d20-rl:test', async () => 'ok', {
         rateLimit: { maxCalls: -1, windowMs: 1000 },
-      })
-    ).rejects.toThrow(/maxCalls/)
+      })).toThrow(/maxCalls/)
   })
 
   it('rateLimit.windowMs = 0 should throw', async () => {
-    await expect(
-      act('d20-rl2:test', async () => 'ok', {
+    expect(() => act('d20-rl2:test', async () => 'ok', {
         rateLimit: { maxCalls: 5, windowMs: 0 },
-      })
-    ).rejects.toThrow(/windowMs/)
+      })).toThrow(/windowMs/)
   })
 
   it('hedge.delayMs = 0 should throw', async () => {
-    await expect(
-      act('d20-hedge:test', async () => 'ok', {
+    expect(() => act('d20-hedge:test', async () => 'ok', {
         hedge: { delayMs: 0 },
-      })
-    ).rejects.toThrow(/delayMs/)
+      })).toThrow(/delayMs/)
   })
 
   it('hedge.delayMs = -10 should throw', async () => {
-    await expect(
-      act('d20-hedge2:test', async () => 'ok', {
+    expect(() => act('d20-hedge2:test', async () => 'ok', {
         hedge: { delayMs: -10 },
-      })
-    ).rejects.toThrow(/delayMs/)
+      })).toThrow(/delayMs/)
   })
 })
 

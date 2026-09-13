@@ -35,27 +35,21 @@ describe('BUG-D40: drain resolver leak on timeout', () => {
 
 describe('BUG-D41: audit.log not validated', () => {
   it('audit.log = "not a function" should throw at validation time', async () => {
-    await expect(
-      act('d41-audit:test', async () => 'ok', {
+    expect(() => act('d41-audit:test', async () => 'ok', {
         audit: { log: 'not a function' as unknown as (e: unknown) => void },
-      })
-    ).rejects.toThrow(/audit\.log/)
+      })).toThrow(/audit\.log/)
   })
 
   it('audit.log = null should throw', async () => {
-    await expect(
-      act('d41-audit2:test', async () => 'ok', {
+    expect(() => act('d41-audit2:test', async () => 'ok', {
         audit: { log: null as unknown as (e: unknown) => void },
-      })
-    ).rejects.toThrow(/audit\.log/)
+      })).toThrow(/audit\.log/)
   })
 
   it('audit.log = undefined should throw', async () => {
-    await expect(
-      act('d41-audit3:test', async () => 'ok', {
+    expect(() => act('d41-audit3:test', async () => 'ok', {
         audit: { log: undefined as unknown as (e: unknown) => void },
-      })
-    ).rejects.toThrow(/audit\.log/)
+      })).toThrow(/audit\.log/)
   })
 })
 

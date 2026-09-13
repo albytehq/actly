@@ -1,6 +1,6 @@
 {
   "name": "actly",
-  "version": "1.3.0",
+  "version": "1.4.2",
   "description": "A typed reliability kernel for async execution.",
   "keywords": [
     "reliability",
@@ -58,7 +58,7 @@
   },
   "sideEffects": false,
   "scripts": {
-    "build": "tsc --project tsconfig.build.json && tsc --project tsconfig.cjs.json && node scripts/postbuild.mjs",
+    "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
     "typecheck:tests": "tsc --noEmit --project tsconfig.test.json",
     "lint": "eslint src --ext .ts --ignore-pattern 'src/__tests__/**'",
@@ -68,6 +68,7 @@
     "test:coverage": "vitest run --coverage",
     "bench": "node bench/index.mjs",
     "bench:compare": "node bench/compare-cockatiel.mjs",
+    "size": "node scripts/size-report.mjs",
     "prepublishOnly": "npm run typecheck && npm run lint && npm test && npm run build"
   },
   "devDependencies": {
@@ -75,6 +76,7 @@
     "@typescript-eslint/eslint-plugin": "^8.0.0",
     "@typescript-eslint/parser": "^8.0.0",
     "@vitest/coverage-v8": "^1.6.0",
+    "esbuild": "^0.28.2",
     "eslint": "^9.0.0",
     "fast-check": "^3.19.0",
     "globals": "^17.7.0",

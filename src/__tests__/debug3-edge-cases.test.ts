@@ -398,15 +398,15 @@ describe('Debug3: normalizeDedupe edge cases', () => {
   it('dedupe: { enabled: true, inflightTtl: 0 } → rejected by validation', async () => {
     // 0 is rejected up front by assertDedupeOptions. Callers who want immediate
     // expiry should pass a small positive number (e.g. 1ms).
-    await expect(act('nd-zero', async () => 'ok', {
+    expect(() => act('nd-zero', async () => 'ok', {
       dedupe: { enabled: true, inflightTtl: 0 },
-    })).rejects.toThrow(/inflightTtl must be > 0/)
+    })).toThrow(/inflightTtl must be > 0/)
   })
 
   it('dedupe: { enabled: true, inflightTtl: NaN } → rejected by validation', async () => {
-    await expect(act('nd-nan', async () => 1, {
+    expect(() => act('nd-nan', async () => 1, {
       dedupe: { enabled: true, inflightTtl: NaN },
-    })).rejects.toThrow(/non-negative/)
+    })).toThrow(/non-negative/)
   })
 
   it('dedupe: { enabled: true, inflightTtl: Infinity } → accepted', async () => {

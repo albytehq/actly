@@ -269,7 +269,7 @@ describe('audit regressions', () => {
     })
 
     it('preserves code and key on TimeoutError', async () => {
-      const { sanitizeError } = await import('../utils/sanitize.js')
+      const { sanitizeError } = await import('../errors.js')
       const err = new TimeoutError(5000, { key: 'k' })
       const sanitized = sanitizeError(err) as { code?: string; key?: string; name?: string }
       expect(sanitized.code).toBe('ACTLY_TIMEOUT')

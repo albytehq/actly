@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { act, withStore, InMemoryStore } from '../index.js'
 import { isActlyEventType } from '../testing/index.js'
-import { safeCall } from '../utils/safeCall.js'
+import { safeCall } from '../safeCall.js'
 
 const wait = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
 
@@ -97,7 +97,7 @@ describe('Debug4: isActlyEventType covers all event types', () => {
 
 describe('Debug4: decorator edge cases', () => {
   it('preserves this context with class properties', async () => {
-    const { usePolicy } = await import('../utils/decorator.js')
+    const { usePolicy } = await import('../usePolicy.js')
 
     class Service {
       private prefix = 'Hello '
@@ -118,7 +118,7 @@ describe('Debug4: decorator edge cases', () => {
   })
 
   it('works with method that takes no args (no signal)', async () => {
-    const { usePolicy } = await import('../utils/decorator.js')
+    const { usePolicy } = await import('../usePolicy.js')
 
     class Service {
       async getValue(): Promise<number> {
@@ -137,7 +137,7 @@ describe('Debug4: decorator edge cases', () => {
   })
 
   it('works with method that takes multiple args after signal', async () => {
-    const { usePolicy } = await import('../utils/decorator.js')
+    const { usePolicy } = await import('../usePolicy.js')
 
     class Service {
       async compute(_signal: AbortSignal, a: number, b: number, c: number): Promise<number> {
@@ -156,7 +156,7 @@ describe('Debug4: decorator edge cases', () => {
   })
 
   it('throws ActResult error on failure (not raw error)', async () => {
-    const { usePolicy } = await import('../utils/decorator.js')
+    const { usePolicy } = await import('../usePolicy.js')
 
     class Service {
       async fail(_signal: AbortSignal): Promise<string> {
@@ -174,7 +174,7 @@ describe('Debug4: decorator edge cases', () => {
   })
 
   it('derived class inherits decorated method', async () => {
-    const { usePolicy } = await import('../utils/decorator.js')
+    const { usePolicy } = await import('../usePolicy.js')
 
     class Base {
       async method(_signal: AbortSignal): Promise<string> {
@@ -351,23 +351,23 @@ describe('Debug4: hedge keepLoser:true', () => {
 
 describe('Debug4: key type coercion', () => {
   it('number key throws (must be string)', async () => {
-    await expect(act(42 as unknown as string, async () => 1)).rejects.toThrow(/must be a string/)
+    expect(() => act(42 as unknown as string, async () => 1)).toThrow(/must be a string/)
   })
 
   it('null key throws', async () => {
-    await expect(act(null as unknown as string, async () => 1)).rejects.toThrow(/must be a string/)
+    expect(() => act(null as unknown as string, async () => 1)).toThrow(/must be a string/)
   })
 
   it('undefined key throws', async () => {
-    await expect(act(undefined as unknown as string, async () => 1)).rejects.toThrow(/must be a string/)
+    expect(() => act(undefined as unknown as string, async () => 1)).toThrow(/must be a string/)
   })
 
   it('object key throws', async () => {
-    await expect(act({} as unknown as string, async () => 1)).rejects.toThrow(/must be a string/)
+    expect(() => act({} as unknown as string, async () => 1)).toThrow(/must be a string/)
   })
 
   it('boolean key throws', async () => {
-    await expect(act(true as unknown as string, async () => 1)).rejects.toThrow(/must be a string/)
+    expect(() => act(true as unknown as string, async () => 1)).toThrow(/must be a string/)
   })
 })
 

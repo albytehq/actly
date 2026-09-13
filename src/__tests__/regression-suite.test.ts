@@ -161,7 +161,7 @@ describe('index: utility functions are part of the public API', () => {
 
 describe('sanitizeKey: empty key handling', () => {
   it('act() with empty key throws synchronously', async () => {
-    await expect(act('', async () => 1)).rejects.toThrow(/non-empty/)
+    expect(() => act('', async () => 1)).toThrow(/non-empty/)
   })
 
   it('invalidate() with empty key throws synchronously', () => {
@@ -180,7 +180,7 @@ describe('sanitizeKey: key length boundary', () => {
 
   it('key one char over MAX_KEY_LENGTH is rejected', async () => {
     const key = 'a'.repeat(LIMITS.MAX_KEY_LENGTH + 1)
-    await expect(act(key, async () => 1)).rejects.toThrow(/exceeds limit/)
+    expect(() => act(key, async () => 1)).toThrow(/exceeds limit/)
   })
 })
 

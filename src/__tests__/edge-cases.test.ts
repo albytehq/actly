@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { act, withStore, InMemoryStore, execute, noopPolicy, sanitizeKey, computeDelay, LIMITS } from '../index.js'
-import { sleep, raceAbort, anySignal, linkSignal, isAbortError } from '../utils/abort.js'
+import { sleep, raceAbort, anySignal, linkSignal, isAbortError } from '../abort.js'
 
 const wait = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
 
@@ -71,7 +71,7 @@ describe('Edge: computeDelay', () => {
 
 describe('Edge: key validation', () => {
   it('rejects empty string key', async () => {
-    await expect(act('', async () => 1)).rejects.toThrow(/non-empty/)
+    expect(() => act('', async () => 1)).toThrow(/non-empty/)
   })
 
   it('accepts key that is exactly 1024 chars', async () => {
@@ -82,7 +82,7 @@ describe('Edge: key validation', () => {
 
   it('rejects key that is 1025 chars', async () => {
     const key = 'a'.repeat(1025)
-    await expect(act(key, async () => 1)).rejects.toThrow(/exceeds limit/)
+    expect(() => act(key, async () => 1)).toThrow(/exceeds limit/)
   })
 
   it('accepts unicode/emoji keys', async () => {
@@ -101,15 +101,15 @@ describe('Edge: key validation', () => {
   })
 
   it('rejects key with null byte', async () => {
-    await expect(act('a\x00b', async () => 1)).rejects.toThrow(/control/)
+    expect(() => act('a\x00b', async () => 1)).toThrow(/control/)
   })
 
   it('rejects key with DEL char (0x7f)', async () => {
-    await expect(act('a\x7fb', async () => 1)).rejects.toThrow(/control/)
+    expect(() => act('a\x7fb', async () => 1)).toThrow(/control/)
   })
 
   it('rejects key with CR', async () => {
-    await expect(act('a\rb', async () => 1)).rejects.toThrow(/control/)
+    expect(() => act('a\rb', async () => 1)).toThrow(/control/)
   })
 
   it('allows key with LF (newline)', async () => {
@@ -247,71 +247,71 @@ describe('Edge: signal already aborted', () => {
 
 describe('Edge: numeric validation', () => {
   it('rejects retry.attempts = 0', async () => {
-    await expect(act('k', async () => 1, { retry: { attempts: 0 } })).rejects.toThrow(/positive integer/)
+    expect(() => act('k', async () => 1, { retry: { attempts: 0 } })).toThrow(/positive integer/)
   })
 
   it('rejects retry.attempts = -1', async () => {
-    await expect(act('k', async () => 1, { retry: { attempts: -1 } })).rejects.toThrow(/positive integer/)
+    expect(() => act('k', async () => 1, { retry: { attempts: -1 } })).toThrow(/positive integer/)
   })
 
   it('rejects retry.attempts = 1.5 (non-integer)', async () => {
-    await expect(act('k', async () => 1, { retry: { attempts: 1.5 } })).rejects.toThrow(/positive integer/)
+    expect(() => act('k', async () => 1, { retry: { attempts: 1.5 } })).toThrow(/positive integer/)
   })
 
   it('rejects retry.attempts = NaN', async () => {
-    await expect(act('k', async () => 1, { retry: { attempts: NaN } })).rejects.toThrow(/positive integer/)
+    expect(() => act('k', async () => 1, { retry: { attempts: NaN } })).toThrow(/positive integer/)
   })
 
   it('rejects retry.attempts = Infinity', async () => {
-    await expect(act('k', async () => 1, { retry: { attempts: Infinity } })).rejects.toThrow(/positive integer/)
+    expect(() => act('k', async () => 1, { retry: { attempts: Infinity } })).toThrow(/positive integer/)
   })
 
   it('rejects timeout.ms = 0', async () => {
-    await expect(act('k', async () => 1, { timeout: { ms: 0 } })).rejects.toThrow(/positive finite/)
+    expect(() => act('k', async () => 1, { timeout: { ms: 0 } })).toThrow(/positive finite/)
   })
 
   it('rejects timeout.ms = -1', async () => {
-    await expect(act('k', async () => 1, { timeout: { ms: -1 } })).rejects.toThrow(/positive finite/)
+    expect(() => act('k', async () => 1, { timeout: { ms: -1 } })).toThrow(/positive finite/)
   })
 
   it('rejects timeout.ms = NaN', async () => {
-    await expect(act('k', async () => 1, { timeout: { ms: NaN } })).rejects.toThrow(/positive finite/)
+    expect(() => act('k', async () => 1, { timeout: { ms: NaN } })).toThrow(/positive finite/)
   })
 
   it('rejects cache.ttl = 0', async () => {
-    await expect(act('k', async () => 1, { cache: { ttl: 0 } })).rejects.toThrow(/positive finite/)
+    expect(() => act('k', async () => 1, { cache: { ttl: 0 } })).toThrow(/positive finite/)
   })
 
   it('rejects cache.ttl = Infinity', async () => {
-    await expect(act('k', async () => 1, { cache: { ttl: Infinity } })).rejects.toThrow(/positive finite/)
+    expect(() => act('k', async () => 1, { cache: { ttl: Infinity } })).toThrow(/positive finite/)
   })
 
   it('rejects bulkhead.maxConcurrent = 0', async () => {
-    await expect(act('k', async () => 1, { bulkhead: { maxConcurrent: 0 } })).rejects.toThrow(/positive integer/)
+    expect(() => act('k', async () => 1, { bulkhead: { maxConcurrent: 0 } })).toThrow(/positive integer/)
   })
 
   it('rejects circuitBreaker.threshold = 0', async () => {
-    await expect(act('k', async () => 1, { circuitBreaker: { threshold: 0, cooldownMs: 1000 } })).rejects.toThrow(/positive integer/)
+    expect(() => act('k', async () => 1, { circuitBreaker: { threshold: 0, cooldownMs: 1000 } })).toThrow(/positive integer/)
   })
 
   it('rejects rateLimit.maxCalls = 0', async () => {
-    await expect(act('k', async () => 1, { rateLimit: { maxCalls: 0, windowMs: 1000 } })).rejects.toThrow(/positive integer/)
+    expect(() => act('k', async () => 1, { rateLimit: { maxCalls: 0, windowMs: 1000 } })).toThrow(/positive integer/)
   })
 
   it('rejects hedge.delayMs = 0', async () => {
-    await expect(act('k', async () => 1, { hedge: { delayMs: 0 } })).rejects.toThrow(/positive finite/)
+    expect(() => act('k', async () => 1, { hedge: { delayMs: 0 } })).toThrow(/positive finite/)
   })
 
   it('rejects hedge.delayMs = -1', async () => {
-    await expect(act('k', async () => 1, { hedge: { delayMs: -1 } })).rejects.toThrow(/positive finite/)
+    expect(() => act('k', async () => 1, { hedge: { delayMs: -1 } })).toThrow(/positive finite/)
   })
 
   it('rejects signal that is not an AbortSignal', async () => {
-    await expect(act('k', async () => 1, { signal: 'not-a-signal' as unknown as AbortSignal })).rejects.toThrow(/AbortSignal/)
+    expect(() => act('k', async () => 1, { signal: 'not-a-signal' as unknown as AbortSignal })).toThrow(/AbortSignal/)
   })
 
   it('rejects retry.shouldRetry that is not a function', async () => {
-    await expect(act('k', async () => 1, { retry: { attempts: 3, shouldRetry: 'not-a-fn' as unknown as () => boolean } })).rejects.toThrow(/function/)
+    expect(() => act('k', async () => 1, { retry: { attempts: 3, shouldRetry: 'not-a-fn' as unknown as () => boolean } })).toThrow(/function/)
   })
 })
 

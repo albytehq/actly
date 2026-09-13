@@ -1,5 +1,80 @@
 # Changelog
 
+## v1.4.2 - 2026-09-13
+
+Reliability and distribution release. One execution engine, real CJS, validated observability, 4.5× faster policy path, 21% smaller tarball. Based on a full external review that logged 27 findings (3 critical, 7 documentation, 9 medium, 8 minor) — all 27 fixed — followed by a pre-release audit pass that logged 9 more (all fixed) and a registry-install consumer verification pass (CJS + ESM smoke tests against the shipped bundle). Test count grew from 633 to 717.
+
+### Critical fixes
+
+- **Hedge aborted the winner on the default placement** (BUG-CORE-015 regression). v1.3.0 claimed "only the loser is aborted" and fixed `wrapHedge`, but `runWithHedge` — the path used by the *default* `outside-retry` placement — still aborted both controllers after the race settled, cancelling the winner's live downstream side-effects (streaming bodies, cursor cleanup). Both placements now delegate to one shared hedge race implementation, so this class of drift is structurally impossible.
+- **CJS distribution was broken on most supported Node versions.** `dist/index.cjs` required ESM files, so `require('actly')` only worked on Node 22.12+/20.19+ via `require(esm)` — despite `engines: ">=20"` — and 27 `.cjs` interstitials shipped as 121 KB of dead weight. The build now produces a standalone minified CJS bundle (plus the ESM bundle), so every Node 20+ loads the package in both formats.
+- **Observability validation was claimed but never implemented.** MIGRATION.md and RELEASE_NOTES for 1.3.0 promised "typos in hook names throw at call time"; no validation existed. Unknown hook names and non-function hooks now throw synchronously from `act()`.
+- **`error.name` survives minification.** Minifiers rename classes, and `ActlyError` derived `this.name` from `new.target.name` — in a minified bundle a runtime `TimeoutError` would have reported `error.name` and `toJSON().name` as `"U"`. Every concrete error class now pins its name string in its constructor (the standard JS pattern; `new.target.name` stays as the default for user subclasses). esbuild's `keepNames` was evaluated and rejected: an A/B benchmark measured it at ~30% slower on the policy path (6.17 vs 4.76 µs/op) — it restores every function and class name, not just the error contract. `verify-dist` asserts every error instance's name plus a runtime-thrown error's name in both the ESM and CJS bundles, and the source suite guards the pinned strings. Static `Class.name` on exported class objects remains minified (standard for minified bundles; instance names are the contract).
+
+### Contract change (as documented since 1.3.0)
+
+- `act()` and scoped `act()` now throw **synchronously** for programmer errors (invalid key/options) instead of returning a rejected promise. Runtime failures still always resolve to `ActResult`. This matches what README 1.3.0 already documented ("surfaces synchronously"); code relying on the undocumented rejection path needs a `try/catch` around the call.
+
+### Performance
+
+- Full-options path (timeout + totalTimeout): **20.98 → 4.68 µs/op (4.5×)** — timeout errors are allocated lazily inside the timer, no `Date.now()` per attempt without observability, single engine path.
+- Cache hit: **1.79 → 1.33 µs/op (~25%)**.
+- Fast path passes a shared never-aborted signal instead of allocating an `AbortController` per call (semantically identical: nothing can abort it on that path).
+- Scoped `act()` (`withStore`) gained the no-options fast path it was missing; the `unregisterDrainable` idle path no longer allocates.
+- Frozen options objects are policy-cached in a WeakMap: freeze shared config for zero-allocation chains on every call. Non-frozen options are never cached (mutation stays safe).
+
+### Size
+
+- Tarball **84 → 66.1 KB (-21%)**, unpacked **400 → 209 KB (-48%)**, package files **152 → 43** (dist: 37). Both formats are single minified esbuild bundles; declarations stay tsc-exact per module. Dead `.cjs` interstitials and stale `dist/state` artifacts are gone; `dist/` is no longer committed to git.
+- d.ts files keep their JSDoc (IntelliSense + `@deprecated` markers); runtime JS is fully minified.
+
+### Bug fixes (pre-release audit pass)
+
+- **A failing fallback fired `onFinalFailure` twice and skipped the audit entry.** When `fn` failed *and* the fallback itself threw, one event carried the fallback's error (with a hardcoded `failedBy: 'fn-error'`) and a second carried the original — and the audit log entry was the only consistent record. Exactly one final-failure event now fires: the original error is the outcome, the fallback's error rides along in a new `fallbackError` field, and the audit entry matches.
+- **`durationMs` excluded the fallback's own runtime** on both fallback outcomes (the clock stopped when `fn` failed, before the fallback ran).
+- **`fallback: {}` resolved every failure as `ok: true` with `value: undefined`.** The field is now validated: a fallback without a `value` (or a non-object fallback) throws `TypeError` at call time.
+- **A user fn throwing `HedgeTimeoutError` before the hedge window closed was mistaken for "window elapsed"** — the primary's real error was swallowed and a phantom hedge launched, doubling downstream load. The window signal is now a module-private symbol; user-thrown `HedgeTimeoutError` propagates immediately (matching the documented "primary fails before `delayMs` → its error propagates" semantics). This also stops the internal window from fabricating a misleading `"timed out after 0ms"` error object.
+- **`timeoutPolicy({ ms: Infinity })` reached `setTimeout`, which clamps it to a 1 ms fire** — a timeout that kills every call. `timeoutPolicy`/`totalTimeoutPolicy` now validate at construction.
+- **`cachePolicy({ ttl: 0 })` (or `Infinity`) became an infinite cache** — the store layer maps non-positive/non-finite TTLs to "never expires". Now rejected at construction.
+- **Standalone policy factories silently coerced invalid options** where `act()` throws: `retryPolicy({ attempts: 0 })` → 1 attempt, `rateLimitPolicy({ maxCalls: 0 })` → 1, `circuitBreakerPolicy({ threshold: 0 })` → 1 (and `cooldownMs: NaN` kept an open circuit open forever). Every factory now calls the same `assert*Options` validator the `act()` path uses — identical rules, identical messages. `bulkheadPolicy`'s hand-inlined copy of its validation was replaced by the shared validator.
+- **`enableWatchdog(NaN)` / `(Infinity)` created a 1 ms busy interval** (`setInterval` clamps like `setTimeout`), and a `NaN` threshold fired the watchdog on every tick. `thresholdMs` must now be a positive finite number; watchdog hooks get the same name/function validation as `act()` observability hooks.
+- **`dedupePolicy({ enabled: 'yes' })` / non-object inputs** threw raw engine errors or silently pinned a key forever (`inflightTtl: NaN` → store's never-expire branch). Validated at construction like every other factory.
+
+### Bug fixes (review findings)
+
+- `createHealthCheck` accepted only the concrete `InMemoryStore` class; now any store implementing the contract (async stores report `storeSize: -1`).
+- `dedupePolicy` ignored `opts.enabled` when used directly with `execute()`; `{ enabled: false }` is now a pass-through.
+- `AttemptEvent.durationMs` / `AttemptEvent.error` were declared "set after attempt settles" but never populated; both now fill in on every attempt (engine and retry paths).
+- `bulkheadPolicy` validated nothing at construction; non-finite `queueTimeoutMs` reached `setTimeout(Infinity)` and clamped to a 1 ms fire. All bulkhead fields now validate in the factory, matching the `act()` path.
+- `@usePolicy` keys were built from `constructor.name` alone — anonymous or minified classes collided and deduped into each other. Keys are now `Name#<stable-id>.method`.
+- `sleep()` did not remove its abort listener on the abort path (closure retained by long-lived signals).
+- `safeCall` swallowed hook errors with no trace in production. `ACTLY_LOG_HOOK_ERRORS=1` (cached at load) forces logging.
+- Two divergent message-sanitization implementations (5 entities/8192 cap vs 2 entities/4096 cap) unified into one (`redact.ts`), used by `ActlyError.toJSON` and health recording.
+- `drain()`/`drainAll()` accepted negative/Infinity `timeoutMs` (Node clamped to 1 ms); both now throw `RangeError`.
+- Circuit-breaker state is stored with a TTL (cooldown + reset window, capped at 24 h) so dead keys no longer pin state in the LRU forever.
+- `isActlyError` now requires a known `ACTLY_*` code and an Error-like shape, so plain objects carrying an `ACTLY_`-prefixed `code` no longer match. Realm-safety for real errors is unchanged.
+- `rateLimit` detects out-of-order timestamps after backwards clock jumps and falls back to a full-window scan (conservative, never over-admitting).
+- **`dedupe: { inflightTtl: 30_000 }` silently did nothing in `act()`.** The same object activates `dedupePolicy()` when used standalone, and `cache: { ttl }` activates the cache — one options style, three doors, two meanings since at least v1.3.0. The object form now enables unless `enabled: false`, matching every other policy and the standalone factory. `dedupe: true` / `dedupe: false` / omitted are unchanged; `DedupeOptions.enabled` is now optional in the type. Found by the consumer smoke test (a registry install) that runs against the shipped bundle; regression tests cover `act()`, scoped `act()`, and parity with `dedupePolicy()`.
+
+### Added
+
+- Policy factories are public: `retryPolicy`, `timeoutPolicy`, `totalTimeoutPolicy`, `dedupePolicy`, `cachePolicy`, `circuitBreakerPolicy`, `bulkheadPolicy`, `rateLimitPolicy`, `noopPolicy` — for custom chains via `execute()`. Every factory validates its options at construction with the same rules (and messages) as the `act()` path.
+- `retry.acceptResult` — the non-inverted spelling of `shouldRetryResult`.
+- `OBSERVABILITY_HOOKS` — the list of valid hook names (also used in validation errors).
+- `FinalFailureEvent.fallbackError` — present when a configured fallback itself threw; the call's outcome error is still the original `fn` error, but a broken fallback is now detectable instead of invisible.
+
+### Deprecated (removal in 2.0)
+
+- `retry.shouldRetryResult` — use `acceptResult`.
+- `acquireController` / `releaseController` / `poolSize` — the fast path uses a shared never-aborted signal; the pool has no internal use.
+
+### Internal
+
+- `act()` and the scoped `act()` share one execution engine (`core/engine.ts`); the 230-line duplication that let the hedge regression ship is gone.
+- Outcome reporting (health record + observability event + audit entry) is centralized in `core/outcome.ts` instead of copy-pasted at every exit path.
+- `src/utils/` catch-all directory dissolved into purpose-named modules (`abort.ts`, `keys.ts`, `limits.ts`, `validate.ts`, `backoff.ts`, `safeCall.ts`, `redact.ts`); the unreachable `src/state/` shim is deleted; `stores/base.ts` renamed to `stores/contract.ts`.
+- Comments trimmed to public JSDoc plus load-bearing one-liners; d.ts JSDoc retained.
+
 ## v1.3.0 - 2026-07-06
 
 Hardening release. Smaller tarball, more policies, deeper audit. 6 breaking changes (see [MIGRATION.md](./MIGRATION.md)).

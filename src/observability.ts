@@ -1,26 +1,4 @@
-/**
- * Observability hooks for the `act()` lifecycle.
- *
- * When `options.observability` is null/undefined the hot path is just a
- * null-check per policy decision - no event objects, no calls. When hooks
- * are registered, events are allocated lazily, only when they actually
- * fire (a cache hit never allocates an `onRetry` event, for example).
- *
- * Every event carries `key`, `traceId`, `timestamp` for correlation;
- * event-specific fields sit on the same object so user code can destructure
- * flat.
- *
- * # Ordering
- *
- * Fresh call with retries:
- *   onAttempt(1) -> onRetry(1->2) -> onAttempt(2) -> onRetry(2->3) -> onAttempt(3) -> onFinalSuccess
- *
- * Cache hit:    onCacheHit -> onFinalSuccess
- * Dedupe join:  onDedupeJoin -> onFinalSuccess (or onFinalFailure)
- * Timeout:      onAttempt -> onTimeout -> onFinalFailure
- */
-
-import type { ActSource, ActlyFailedBy } from './types/index.js'
+import type { ActSource, ActlyFailedBy } from './types.js'
 
 /** Stable discriminator for telemetry. */
 export type ActlyEventType =
@@ -37,13 +15,9 @@ export type ActlyEventType =
 
 /** Common fields on every event. */
 export interface ActlyEventBase {
-  /** The `key` passed to `act()`. */
   readonly key: string
-  /** Auto-generated trace ID (or user-supplied via `options.traceId`). */
   readonly traceId: string
-  /** Event timestamp (ms since epoch). */
   readonly timestamp: number
-  /** Discriminator for switch statements. */
   readonly type: ActlyEventType
 }
 
@@ -51,25 +25,21 @@ export interface AttemptEvent extends ActlyEventBase {
   readonly type: 'attempt'
   /** 1-based attempt number. */
   readonly attempt: number
-  /** Duration of this attempt in ms (set after attempt settles). */
+  /** Filled in after the attempt settles. */
   readonly durationMs?: number
-  /** Error from this attempt, if it failed. */
+  /** Filled in after the attempt settles, when it failed. */
   readonly error?: unknown
 }
 
 export interface RetryEvent extends ActlyEventBase {
   readonly type: 'retry'
-  /** The attempt that just failed. */
   readonly attempt: number
-  /** The delay (ms) before the next attempt. */
   readonly delayMs: number
-  /** Error that triggered the retry. */
   readonly error: unknown
 }
 
 export interface CacheHitEvent extends ActlyEventBase {
   readonly type: 'cache-hit'
-  /** Age of the cached value in ms. */
   readonly ageMs: number
 }
 
@@ -79,42 +49,49 @@ export interface CacheMissEvent extends ActlyEventBase {
 
 export interface DedupeJoinEvent extends ActlyEventBase {
   readonly type: 'dedupe-join'
-  /** This caller's position in the joiner queue (1 = first joiner). */
   readonly joinerPosition: number
 }
 
 export interface TimeoutEvent extends ActlyEventBase {
   readonly type: 'timeout'
-  /** Which deadline fired. */
   readonly kind: 'per-attempt' | 'total'
-  /** The configured ms. */
   readonly ms: number
 }
 
 export interface FinalSuccessEvent extends ActlyEventBase {
   readonly type: 'final-success'
-  /** Where the value came from. */
   readonly source: ActSource
-  /** Total attempts made (0 for cache hit). */
   readonly attempts: number
-  /** Total wall-clock duration of the act() call. */
   readonly durationMs: number
 }
 
 export interface FinalFailureEvent extends ActlyEventBase {
   readonly type: 'final-failure'
-  /** Total attempts made. */
   readonly attempts: number
-  /** Total wall-clock duration of the act() call. */
   readonly durationMs: number
-  /**
-   * Stable reason for failure - use for telemetry tags. Re-exported as
-   * `ActlyFailedBy` so `AuditEntry.failedBy` and this field share one
-   * source of truth.
-   */
   readonly failedBy: ActlyFailedBy
-  /** The final error. */
   readonly error: unknown
+  /**
+   * Present when a `fallback` was configured and itself threw before the
+   * original error was surfaced. The call's outcome error is still
+   * `error`; this field exists so a broken fallback is detectable.
+   */
+  readonly fallbackError?: unknown
+}
+
+export interface BackpressureEvent extends ActlyEventBase {
+  readonly type: 'backpressure'
+  readonly source: 'bulkhead'
+  readonly queueLength: number
+  readonly maxConcurrent: number
+  readonly maxQueueSize: number
+  readonly utilization: number
+}
+
+export interface WatchdogEvent extends ActlyEventBase {
+  readonly type: 'watchdog'
+  readonly elapsedMs: number
+  readonly scope: string
 }
 
 export type ActlyEvent =
@@ -129,37 +106,26 @@ export type ActlyEvent =
   | BackpressureEvent
   | WatchdogEvent
 
-export interface BackpressureEvent extends ActlyEventBase {
-  readonly type: 'backpressure'
-  /** Which policy emitted the backpressure signal. */
-  readonly source: 'bulkhead'
-  /** Current queue length (callers waiting for a slot). */
-  readonly queueLength: number
-  /** Configured maxConcurrent for this key. */
-  readonly maxConcurrent: number
-  /** Configured maxQueueSize for this key (Infinity if unbounded). */
-  readonly maxQueueSize: number
-  /** Utilization ratio (queueLength / maxQueueSize). 1.0 = full. */
-  readonly utilization: number
-}
-
 /**
- * Watchdog fired: an in-flight `act()` has been pending past the
- * configured threshold (default 60s). Opt-in via `enableWatchdog()` -
- * off by default to avoid per-call timer overhead.
+ * All valid hook names on {@link ObservabilityHooks}. `act()` rejects
+ * unknown keys in `options.observability` so typos fail loudly instead of
+ * silently dropping telemetry.
  */
-export interface WatchdogEvent extends ActlyEventBase {
-  readonly type: 'watchdog'
-  /** How long the call has been in-flight (ms). */
-  readonly elapsedMs: number
-  /** The scope the stuck call is in. */
-  readonly scope: string
-}
+export const OBSERVABILITY_HOOKS = [
+  'onAttempt',
+  'onRetry',
+  'onCacheHit',
+  'onCacheMiss',
+  'onDedupeJoin',
+  'onTimeout',
+  'onFinalSuccess',
+  'onFinalFailure',
+  'onBackpressure',
+  'onWatchdog',
+] as const
 
-/**
- * User-supplied observability hooks. All optional. When absent, zero
- * overhead is incurred on the hot path.
- */
+export type ObservabilityHookName = (typeof OBSERVABILITY_HOOKS)[number]
+
 export interface ObservabilityHooks {
   onAttempt?: (event: AttemptEvent) => void
   onRetry?: (event: RetryEvent) => void
@@ -169,30 +135,33 @@ export interface ObservabilityHooks {
   onTimeout?: (event: TimeoutEvent) => void
   onFinalSuccess?: (event: FinalSuccessEvent) => void
   onFinalFailure?: (event: FinalFailureEvent) => void
-  /**
-   * Bulkhead queue utilization crossed 80%. Emitted at most once per
-   * crossing (not on every call) so callers can throttle upstream
-   * before the bulkhead starts rejecting.
-   */
+  /** Bulkhead queue utilization crossed 80%. Emitted at most once per crossing. */
   onBackpressure?: (event: BackpressureEvent) => void
-  /**
-   * Watchdog threshold exceeded for an in-flight call. Opt-in via
-   * `enableWatchdog()`; not fired by default.
-   */
+  /** Watchdog threshold exceeded for an in-flight call. Opt-in via `enableWatchdog()`. */
   onWatchdog?: (event: WatchdogEvent) => void
 }
 
 /**
- * Threads observability through the policy chain without changing every
- * policy's signature. Attached to `PolicyContext` as an optional field;
- * policies that emit events check for its presence. `traceId` lives here
- * too so policies can stamp it onto events.
+ * Threads observability through the policy chain: attached to
+ * `PolicyContext.observability`; policies null-check before allocating
+ * events, so absent means zero overhead.
  */
 export interface ObservabilityContext {
   traceId: string
   hooks: ObservabilityHooks
-  /** Per-call counter for dedupe joiner position (approximate). */
   joinerCounter: number
+}
+
+/**
+ * Fill the post-settle fields of an {@link AttemptEvent} already handed to
+ * `onAttempt`. The event is mutated in place; consumers holding the object
+ * observe the values appear once the attempt settles.
+ * @internal
+ */
+export function fillAttemptOutcome(event: AttemptEvent, durationMs: number, error: unknown): void {
+  const mutable = event as { durationMs?: number; error?: unknown }
+  mutable.durationMs = durationMs
+  if (error !== undefined) mutable.error = error
 }
 
 /**

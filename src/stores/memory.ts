@@ -1,25 +1,19 @@
-import type { SyncStateStore } from './base.js'
-import { LIMITS } from '../utils/limits.js'
-
-// ─── Internal types ───────────────────────────────────────────────────────────
+import type { SyncStateStore } from './contract.js'
+import { LIMITS } from '../limits.js'
 
 interface Entry<T> {
   value: T
-  // null = never expires (used by dedupe's in-flight promises).
+  /** null = never expires. */
   expiresAt: number | null
-  // Wall-clock insertion time, used by cachePolicy for accurate ageMs.
+  /** Wall-clock insertion time, reported by cachePolicy as ageMs. */
   insertedAt: number
-  // LRU doubly-linked list pointers. Undefined at head/tail.
   prev?: LRUNode
   next?: LRUNode
   key: string
 }
 
-// The LRU list uses Entry nodes directly - aliased for readability.
 type LRUNode = Entry<unknown>
 
-// Node.js timers expose unref(); browser timers don't. Duck-type the check
-// so the same code runs in both.
 interface UnrefableTimer {
   unref(): void
 }
@@ -28,59 +22,36 @@ function isUnrefable(t: unknown): t is UnrefableTimer {
   return typeof (t as UnrefableTimer).unref === 'function'
 }
 
-// ─── Options ──────────────────────────────────────────────────────────────────
-
 export interface InMemoryStoreOptions {
   /**
-   * Periodically sweep expired entries in the background. Off by default
-   * for explicit-store users; the module-level default store enables it.
+   * Periodically sweep expired entries in the background. Off by default;
+   * the module-level default store enables it.
    */
   autoCleanup?: boolean
-
   /** Sweep interval in ms. Default 30 000. Ignored when autoCleanup is false. */
   cleanupIntervalMs?: number
-
   /**
-   * Max live entries. On overflow, set() evicts the least-recently-used
-   * first. Updates to an existing key don't trigger eviction. The LRU
-   * order refreshes on both get() and set() via an O(1) linked-list move.
-   *
-   * Default is bounded (LIMITS.DEFAULT_STORE_MAX_SIZE, 10 000). Pass
-   * `Infinity` for unbounded storage - pair with autoCleanup.
+   * Max live entries; `set()` evicts the least-recently-used on overflow.
+   * LRU order refreshes on `get()` and `set()` in O(1). Default
+   * `LIMITS.DEFAULT_STORE_MAX_SIZE` (10 000). Pass `Infinity` for unbounded.
    */
   maxSize?: number
-
   /**
-   * React to Node.js memory-pressure events by sweeping immediately. On
-   * Node 22+ V8 emits a 'memory' warning at the lowest-pressure tier;
-   * this sweeps expired entries proactively before GC pressure becomes
-   * critical. No-op on older runtimes. Default off.
+   * Sweep immediately on Node 22+ `memory` pressure events. No-op on older
+   * runtimes. Default off.
    */
   memoryPressureCleanup?: boolean
 }
 
-// ─── Implementation ───────────────────────────────────────────────────────────
-
 /**
- * Reference SyncStateStore backed by a Map + doubly-linked list for LRU.
- *
- * `size()` is O(1) (tracked via Map.size). LRU reordering uses the
- * linked list instead of delete+set Map churn. Default maxSize is bounded
- * when used as the module-level default.
- *
- * Expiry is lazy on get()/has(); the optional background sweep reclaims
- * entries that are never re-read.
+ * Reference `SyncStateStore`: a Map plus a doubly-linked list for O(1) LRU.
+ * Expiry is lazy on `get()`/`has()`; the optional background sweep reclaims
+ * entries that are never re-read. A FinalizationRegistry clears the sweep
+ * timer if the store is GC'd without `destroy()`.
  */
 export class InMemoryStore implements SyncStateStore {
   readonly _sync = true as const
 
-  /**
-   * Auto-clear the cleanup interval when the store is GC'd, so a
-   * forgotten destroy() doesn't leak the timer + Map + entries for the
-   * process lifetime. FinalizationRegistry is available in Node 14.5+
-   * and modern browsers; in environments without it, this is a no-op
-   * and the caller must remember destroy().
-   */
   private static finalizer: FinalizationRegistry<ReturnType<typeof setInterval>> | undefined
   static {
     if (typeof FinalizationRegistry === 'function') {
@@ -92,8 +63,8 @@ export class InMemoryStore implements SyncStateStore {
 
   private readonly map = new Map<string, LRUNode>()
   private readonly maxSize: number
-  private head?: LRUNode  // least recently used
-  private tail?: LRUNode  // most recently used
+  private head?: LRUNode
+  private tail?: LRUNode
   private cleanupTimer: ReturnType<typeof setInterval> | undefined
   private memoryListener: ((...args: unknown[]) => void) | undefined
 
@@ -105,20 +76,12 @@ export class InMemoryStore implements SyncStateStore {
       memoryPressureCleanup = false,
     } = options
 
-    if (!Number.isFinite(maxSize) || maxSize <= 0) {
-      // Infinity is allowed (unbounded); anything else non-positive is a bug.
-      if (maxSize !== Number.POSITIVE_INFINITY) {
+    if (maxSize !== Number.POSITIVE_INFINITY) {
+      if (!Number.isFinite(maxSize) || maxSize <= 0 || !Number.isInteger(maxSize)) {
         throw new RangeError(
-          `Actly: InMemoryStore maxSize must be a positive finite number or Infinity, got ${maxSize}`,
+          `Actly: InMemoryStore maxSize must be a positive integer or Infinity, got ${maxSize}`,
         )
       }
-    }
-    // Reject non-integer maxSize - fractional sizes produce surprising
-    // eviction behaviour.
-    if (maxSize !== Number.POSITIVE_INFINITY && !Number.isInteger(maxSize)) {
-      throw new RangeError(
-        `Actly: InMemoryStore maxSize must be a positive integer or Infinity, got ${maxSize}`,
-      )
     }
 
     this.maxSize = maxSize
@@ -127,12 +90,9 @@ export class InMemoryStore implements SyncStateStore {
       const timer = setInterval(() => this.sweep(), cleanupIntervalMs)
       if (isUnrefable(timer)) timer.unref()
       this.cleanupTimer = timer
-      // Register so the timer is cleared even if the caller forgets destroy().
       InMemoryStore.finalizer?.register(this, timer, this)
     }
 
-    // Node 22+ memory-pressure hook. The 'memory' event doesn't exist on
-    // older versions - the listener simply never fires there.
     if (memoryPressureCleanup) {
       const processOn = (process as unknown as {
         on?: (event: string, listener: (...args: unknown[]) => void) => void
@@ -167,15 +127,12 @@ export class InMemoryStore implements SyncStateStore {
 
     if (existing) {
       existing.value = value
-      // Treat Infinity, null, 0, negative as "no expiry". Normalising to
-      // null avoids surprising code that reads expiresAt directly.
       existing.expiresAt = ttlMs != null && Number.isFinite(ttlMs) && ttlMs > 0 ? now + ttlMs : null
       existing.insertedAt = now
       this.moveToTail(existing)
       return
     }
 
-    // New key - evict LRU entries while at capacity.
     while (this.map.size >= this.maxSize && this.head) {
       const evict = this.head
       this.removeNode(evict)
@@ -200,7 +157,6 @@ export class InMemoryStore implements SyncStateStore {
   }
 
   has(key: string): boolean {
-    // Inline the expiry check - has() must be a pure query, not a touch.
     const node = this.map.get(key)
     if (!node) return false
     if (node.expiresAt !== null && Date.now() > node.expiresAt) {
@@ -218,26 +174,21 @@ export class InMemoryStore implements SyncStateStore {
   }
 
   /**
-   * Live entry count. O(1) - returns Map.size directly. Expired-but-
-   * not-yet-evicted entries are counted; they're reclaimed lazily on
-   * next access or by the background sweep. An accurate count would
-   * need an O(n) scan.
+   * Live entry count, O(1). Expired-but-unvisited entries are counted until
+   * reclaimed lazily or by the sweep.
    */
   size(): number {
     return this.map.size
   }
 
   /**
-   * Stop the cleanup timer and release internal state. Safe to call
-   * multiple times. Clears the Map and LRU pointers so the GC can
-   * reclaim entry values (including any closures over pending Promise
-   * resolvers or AbortController refs held by cache/dedupe/bulkhead).
+   * Stop the cleanup timer, drop the memory listener, and clear all entries.
+   * Safe to call multiple times.
    */
   destroy(): void {
     if (this.cleanupTimer !== undefined) {
       clearInterval(this.cleanupTimer)
       this.cleanupTimer = undefined
-      // Unregister so the finalizer doesn't try to clear twice after GC.
       InMemoryStore.finalizer?.unregister(this)
     }
     if (this.memoryListener) {
@@ -254,9 +205,7 @@ export class InMemoryStore implements SyncStateStore {
     this.tail = undefined
   }
 
-  // ─── LRU list operations ──────────────────────────────────────────────────
-  //
-  // All O(1). The list runs head (LRU) → tail (MRU).
+  // LRU list operations, all O(1); the list runs head (LRU) → tail (MRU).
 
   private appendTail(node: LRUNode): void {
     if (this.tail) {
@@ -291,9 +240,9 @@ export class InMemoryStore implements SyncStateStore {
   }
 
   /**
-   * Sweep expired entries. Two-pass to avoid mutating the Map during
-   * iteration. Wrapped in try/catch - a corrupted entry must never kill
-   * the process via uncaughtException from a setInterval callback.
+   * Sweep expired entries. Two passes to avoid mutating the Map during
+   * iteration; failures are swallowed so a corrupted entry can never kill
+   * the process from a timer callback.
    */
   private sweep(): void {
     try {
@@ -312,15 +261,14 @@ export class InMemoryStore implements SyncStateStore {
         }
       }
     } catch {
-      // Swallow - the next sweep will retry.
+      // next sweep retries
     }
   }
 }
 
 /**
- * Factory for the default module-level store. Bounded by
- * LIMITS.DEFAULT_STORE_MAX_SIZE with background sweep, so long-running
- * servers don't grow memory unbounded without opting in.
+ * Module-level default store: bounded, with a background sweep, so
+ * long-running servers cannot grow memory unbounded by default.
  */
 export function createDefaultStore(): InMemoryStore {
   return new InMemoryStore({

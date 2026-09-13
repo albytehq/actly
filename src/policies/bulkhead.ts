@@ -1,20 +1,23 @@
-import type { ActFn, PolicyApplier, PolicyContext, BulkheadOptions } from '../types/index.js'
-import type { SyncStateStore } from '../stores/base.js'
+import type { ActFn, PolicyApplier, PolicyContext, BulkheadOptions } from '../types.js'
+import type { SyncStateStore } from '../stores/contract.js'
 import { REQUIRES_SYNC_STORE } from '../core/executor.js'
+import { assertBulkheadOptions } from '../validate.js'
 import { BulkheadOverflowError } from '../errors.js'
-import { safeCall } from '../utils/safeCall.js'
+import { safeCall } from '../safeCall.js'
 
 const NS = 'bulk:'
+interface QueueEntry {
+  resolve: () => void
+  reject: (e: unknown) => void
+  timer: ReturnType<typeof setTimeout> | undefined
+  onAbort: (() => void) | undefined
+  signal: AbortSignal | undefined
+}
 
 interface BulkheadState {
   active: number
-  queue: Array<{
-    resolve: () => void
-    reject: (e: unknown) => void
-    timer?: ReturnType<typeof setTimeout>
-    onAbort?: () => void
-    signal?: AbortSignal
-  }>
+  queue: QueueEntry[]
+  backpressureEmitted?: boolean
 }
 
 function getState(store: SyncStateStore, key: string): BulkheadState {
@@ -25,8 +28,20 @@ function setState(store: SyncStateStore, key: string, state: BulkheadState): voi
   store.set(NS + key, state)
 }
 
+/**
+ * Bulkhead: caps concurrent in-flight calls per key. Excess callers reject
+ * immediately when `queueTimeoutMs` is 0 (the default, fail-fast) or queue
+ * up to `maxQueueSize` waiting for a slot until the queue timeout fires.
+ *
+ * Options are validated at construction (since 1.4) via the same
+ * `assertBulkheadOptions` the `act()` path uses, so direct `execute()`
+ * users get identical guarantees: non-finite `queueTimeoutMs` no longer
+ * reaches `setTimeout`, which would clamp it to a 1 ms fire.
+ */
 export function bulkheadPolicy<T>(opts: BulkheadOptions): PolicyApplier<T> {
-  const maxConcurrent = Math.max(1, Math.floor(opts.maxConcurrent))
+  assertBulkheadOptions(opts)
+
+  const maxConcurrent = opts.maxConcurrent
   const queueTimeoutMs = opts.queueTimeoutMs ?? 0
   const maxQueueSize = opts.maxQueueSize ?? Number.POSITIVE_INFINITY
 
@@ -42,7 +57,6 @@ export function bulkheadPolicy<T>(opts: BulkheadOptions): PolicyApplier<T> {
         const state = getState(syncCtx.store, key)
         if (state.active < maxConcurrent) {
           state.active++
-          // persist - getState may have returned a fresh default
           setState(syncCtx.store, key, state)
           return Promise.resolve()
         }
@@ -51,9 +65,6 @@ export function bulkheadPolicy<T>(opts: BulkheadOptions): PolicyApplier<T> {
           throw new BulkheadOverflowError(key, maxConcurrent)
         }
 
-        // bound the queue to prevent OOM under stampede - without this a
-        // 100k-caller spike against maxConcurrent:10 would queue 99990
-        // callers, each holding a resolver + timer + listener closure.
         const currentState = getState(syncCtx.store, key)
         if (currentState.queue.length >= maxQueueSize) {
           throw new BulkheadOverflowError(key, maxConcurrent)
@@ -61,20 +72,9 @@ export function bulkheadPolicy<T>(opts: BulkheadOptions): PolicyApplier<T> {
 
         return new Promise<void>((resolve, reject) => {
           const state2 = getState(syncCtx.store, key)
-          // declare all fields up front so V8 sees one hidden class for
-          // every queue entry - keeps ICs monomorphic
-          const entry: {
-            resolve: () => void
-            reject: (e: unknown) => void
-            timer: ReturnType<typeof setTimeout> | undefined
-            onAbort: (() => void) | undefined
-            signal: AbortSignal | undefined
-          } = {
-            resolve,
-            reject,
-            timer: undefined,
-            onAbort: undefined,
-            signal,
+          // all fields up front: one hidden class for every queue entry
+          const entry: QueueEntry = {
+            resolve, reject, timer: undefined, onAbort: undefined, signal,
           }
 
           entry.onAbort = () => {
@@ -102,14 +102,13 @@ export function bulkheadPolicy<T>(opts: BulkheadOptions): PolicyApplier<T> {
           signal.addEventListener('abort', entry.onAbort!, { once: true })
           state2.queue.push(entry)
 
-          // emit onBackpressure at most once per 80%-crossing to avoid spam.
-          // Checked after pushing so utilization includes this caller.
+          // onBackpressure fires at most once per 80%-crossing
           const obs = syncCtx.observability
           if (obs && maxQueueSize !== Number.POSITIVE_INFINITY) {
             const utilization = state2.queue.length / maxQueueSize
-            const wasOver80 = (state2 as { backpressureEmitted?: boolean }).backpressureEmitted === true
+            const wasOver80 = state2.backpressureEmitted === true
             if (utilization >= 0.8 && !wasOver80) {
-              ;(state2 as { backpressureEmitted?: boolean }).backpressureEmitted = true
+              state2.backpressureEmitted = true
               safeCall(obs.hooks.onBackpressure, {
                 type: 'backpressure',
                 key: syncCtx.key,
@@ -122,7 +121,7 @@ export function bulkheadPolicy<T>(opts: BulkheadOptions): PolicyApplier<T> {
                 utilization,
               })
             } else if (utilization < 0.8 && wasOver80) {
-              ;(state2 as { backpressureEmitted?: boolean }).backpressureEmitted = false
+              state2.backpressureEmitted = false
             }
           }
 
@@ -137,22 +136,17 @@ export function bulkheadPolicy<T>(opts: BulkheadOptions): PolicyApplier<T> {
           const next = state.queue.shift()!
           state.active++
           if (next.timer) clearTimeout(next.timer)
-          // drop the abort listener from the QUEUED caller's signal, not the releaser's
           if (next.onAbort && next.signal) {
             next.signal.removeEventListener('abort', next.onAbort)
           }
           next.resolve()
         }
         if (state.active < 0) state.active = 0
-        // reset the backpressure flag on release too - if the queue drains
-        // purely via releases with no new callers, the acquire path never
-        // gets a chance to clear it and the next 80%-crossing is dropped.
-        if (maxQueueSize !== Number.POSITIVE_INFINITY && (state as { backpressureEmitted?: boolean }).backpressureEmitted === true) {
-          if (state.queue.length / maxQueueSize < 0.8) {
-            ;(state as { backpressureEmitted?: boolean }).backpressureEmitted = false
-          }
+        // clear the flag on release too: a queue draining purely via
+        // releases never re-enters acquire, so the next crossing must arm
+        if (state.backpressureEmitted === true && state.queue.length / maxQueueSize < 0.8) {
+          state.backpressureEmitted = false
         }
-        // drop idle state so high-cardinality keys don't accumulate
         if (state.active === 0 && state.queue.length === 0) {
           syncCtx.store.delete(NS + key)
         } else {

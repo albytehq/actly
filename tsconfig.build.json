@@ -4,11 +4,12 @@
     "outDir": "dist",
     "rootDir": "src",
     "declaration": true,
-    "declarationMap": true,
+    "declarationMap": false,
+    "emitDeclarationOnly": true,
     "sourceMap": false,
-    "removeComments": true,
+    "removeComments": false,
     "stripInternal": true
   },
   "include": ["src"],
-  "exclude": ["node_modules", "dist", "src/__tests__", "src/state"]
+  "exclude": ["node_modules", "dist", "src/__tests__"]
 }

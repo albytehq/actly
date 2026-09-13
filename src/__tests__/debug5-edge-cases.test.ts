@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { act, withStore, InMemoryStore, LIMITS } from '../index.js'
-import { raceAbort, sleep, anySignal, linkSignal } from '../utils/abort.js'
+import { raceAbort, sleep, anySignal, linkSignal } from '../abort.js'
 
 const wait = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
 

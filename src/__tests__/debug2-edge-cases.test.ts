@@ -7,93 +7,93 @@ const wait = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
 
 describe('Debug2: validation for new options', () => {
   it('rejects retry.shouldRetryResult that is not a function', async () => {
-    await expect(act('k', async () => 1, {
+    expect(() => act('k', async () => 1, {
       retry: { attempts: 3, shouldRetryResult: 'not-a-fn' as unknown as () => boolean },
-    })).rejects.toThrow(/shouldRetryResult must be a function/)
+    })).toThrow(/shouldRetryResult must be a function/)
   })
 
   it('rejects retry.backoffFn that is not a function', async () => {
-    await expect(act('k', async () => 1, {
+    expect(() => act('k', async () => 1, {
       retry: { attempts: 3, backoffFn: 42 as unknown as () => number },
-    })).rejects.toThrow(/backoffFn must be a function/)
+    })).toThrow(/backoffFn must be a function/)
   })
 
   it('rejects retry.dangerouslyUnref that is not boolean', async () => {
-    await expect(act('k', async () => 1, {
+    expect(() => act('k', async () => 1, {
       retry: { attempts: 3, dangerouslyUnref: 'yes' as unknown as boolean },
-    })).rejects.toThrow(/dangerouslyUnref must be a boolean/)
+    })).toThrow(/dangerouslyUnref must be a boolean/)
   })
 
   it('rejects timeout.strategy invalid value', async () => {
-    await expect(act('k', async () => 1, {
+    expect(() => act('k', async () => 1, {
       timeout: { ms: 5000, strategy: 'aggressive' as 'race' },
-    })).rejects.toThrow(/strategy must be 'race' or 'cooperative'/)
+    })).toThrow(/strategy must be 'race' or 'cooperative'/)
   })
 
   it('rejects circuitBreaker.strategy invalid value', async () => {
-    await expect(act('k', async () => 1, {
+    expect(() => act('k', async () => 1, {
       circuitBreaker: { threshold: 3, cooldownMs: 1000, strategy: 'sampling' as 'consecutive' },
-    })).rejects.toThrow(/strategy must be 'consecutive' or 'count'/)
+    })).toThrow(/strategy must be 'consecutive' or 'count'/)
   })
 
   it('rejects circuitBreaker.countSize = 0', async () => {
-    await expect(act('k', async () => 1, {
+    expect(() => act('k', async () => 1, {
       circuitBreaker: { threshold: 3, cooldownMs: 1000, strategy: 'count', countSize: 0 },
-    })).rejects.toThrow(/countSize must be a positive integer/)
+    })).toThrow(/countSize must be a positive integer/)
   })
 
   it('rejects circuitBreaker.countSize = 1.5 (non-integer)', async () => {
-    await expect(act('k', async () => 1, {
+    expect(() => act('k', async () => 1, {
       circuitBreaker: { threshold: 3, cooldownMs: 1000, strategy: 'count', countSize: 1.5 },
-    })).rejects.toThrow(/countSize must be a positive integer/)
+    })).toThrow(/countSize must be a positive integer/)
   })
 
   it('rejects circuitBreaker.countThreshold > 1', async () => {
-    await expect(act('k', async () => 1, {
+    expect(() => act('k', async () => 1, {
       circuitBreaker: { threshold: 3, cooldownMs: 1000, strategy: 'count', countThreshold: 1.5 },
-    })).rejects.toThrow(/countThreshold must be.*between 0 and 1/)
+    })).toThrow(/countThreshold must be.*between 0 and 1/)
   })
 
   it('rejects circuitBreaker.countThreshold < 0', async () => {
-    await expect(act('k', async () => 1, {
+    expect(() => act('k', async () => 1, {
       circuitBreaker: { threshold: 3, cooldownMs: 1000, strategy: 'count', countThreshold: -0.1 },
-    })).rejects.toThrow(/countThreshold must be.*between 0 and 1/)
+    })).toThrow(/countThreshold must be.*between 0 and 1/)
   })
 
   it('rejects circuitBreaker.countMinimumCalls = 0', async () => {
-    await expect(act('k', async () => 1, {
+    expect(() => act('k', async () => 1, {
       circuitBreaker: { threshold: 3, cooldownMs: 1000, strategy: 'count', countMinimumCalls: 0 },
-    })).rejects.toThrow(/countMinimumCalls must be a positive integer/)
+    })).toThrow(/countMinimumCalls must be a positive integer/)
   })
 
   it('rejects bulkhead.maxQueueSize = 0', async () => {
-    await expect(act('k', async () => 1, {
+    expect(() => act('k', async () => 1, {
       bulkhead: { maxConcurrent: 1, maxQueueSize: 0 },
-    })).rejects.toThrow(/maxQueueSize must be a positive integer or Infinity/)
+    })).toThrow(/maxQueueSize must be a positive integer or Infinity/)
   })
 
   it('rejects bulkhead.maxQueueSize = -1', async () => {
-    await expect(act('k', async () => 1, {
+    expect(() => act('k', async () => 1, {
       bulkhead: { maxConcurrent: 1, maxQueueSize: -1 },
-    })).rejects.toThrow(/maxQueueSize must be a positive integer or Infinity/)
+    })).toThrow(/maxQueueSize must be a positive integer or Infinity/)
   })
 
   it('rejects bulkhead.maxQueueSize = 1.5 (non-integer)', async () => {
-    await expect(act('k', async () => 1, {
+    expect(() => act('k', async () => 1, {
       bulkhead: { maxConcurrent: 1, maxQueueSize: 1.5 },
-    })).rejects.toThrow(/maxQueueSize must be a positive integer or Infinity/)
+    })).toThrow(/maxQueueSize must be a positive integer or Infinity/)
   })
 
   it('rejects hedge.placement invalid value', async () => {
-    await expect(act('k', async () => 1, {
+    expect(() => act('k', async () => 1, {
       hedge: { delayMs: 100, placement: 'above' as 'outside-retry' },
-    })).rejects.toThrow(/placement must be 'outside-retry' or 'inside-retry'/)
+    })).toThrow(/placement must be 'outside-retry' or 'inside-retry'/)
   })
 
   it('rejects hedge.keepLoser that is not boolean', async () => {
-    await expect(act('k', async () => 1, {
+    expect(() => act('k', async () => 1, {
       hedge: { delayMs: 100, keepLoser: 'yes' as unknown as boolean },
-    })).rejects.toThrow(/keepLoser must be a boolean/)
+    })).toThrow(/keepLoser must be a boolean/)
   })
 
   it('accepts bulkhead.maxQueueSize = Infinity', async () => {
@@ -385,9 +385,9 @@ describe('Debug2: boundary values', () => {
   })
 
   it('retry.attempts = MAX_RETRY_ATTEMPTS + 1 is rejected', async () => {
-    await expect(act('k', async () => 1, {
+    expect(() => act('k', async () => 1, {
       retry: { attempts: LIMITS.MAX_RETRY_ATTEMPTS + 1 },
-    })).rejects.toThrow(/exceeds limit/)
+    })).toThrow(/exceeds limit/)
   })
 
   it('cache.ttl = MAX_CACHE_TTL is accepted', async () => {
@@ -398,9 +398,9 @@ describe('Debug2: boundary values', () => {
   })
 
   it('cache.ttl = MAX_CACHE_TTL + 1 is rejected', async () => {
-    await expect(act('k', async () => 1, {
+    expect(() => act('k', async () => 1, {
       cache: { ttl: LIMITS.MAX_CACHE_TTL + 1 },
-    })).rejects.toThrow(/exceeds limit/)
+    })).toThrow(/exceeds limit/)
   })
 
   it('timeout.ms = MAX_TIMEOUT_MS is accepted', async () => {
@@ -411,9 +411,9 @@ describe('Debug2: boundary values', () => {
   })
 
   it('timeout.ms = MAX_TIMEOUT_MS + 1 is rejected', async () => {
-    await expect(act('k', async () => 1, {
+    expect(() => act('k', async () => 1, {
       timeout: { ms: LIMITS.MAX_TIMEOUT_MS + 1 },
-    })).rejects.toThrow(/exceeds limit/)
+    })).toThrow(/exceeds limit/)
   })
 
   it('retry.delayMs = MAX_RETRY_DELAY_MS is accepted', async () => {
@@ -425,9 +425,9 @@ describe('Debug2: boundary values', () => {
   })
 
   it('retry.delayMs = MAX_RETRY_DELAY_MS + 1 is rejected', async () => {
-    await expect(act('k', async () => 1, {
+    expect(() => act('k', async () => 1, {
       retry: { attempts: 2, delayMs: LIMITS.MAX_RETRY_DELAY_MS + 1 },
-    })).rejects.toThrow(/exceeds limit/)
+    })).toThrow(/exceeds limit/)
   })
 })
 

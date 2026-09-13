@@ -100,42 +100,34 @@ describe('act() zero-throw contract', () => {
 
 describe('act() input validation (fixes M-3, M-4)', () => {
   it('throws on empty key', async () => {
-    await expect(act('', async () => 1)).rejects.toThrow(/non-empty/)
+    expect(() => act('', async () => 1)).toThrow(/non-empty/)
   })
 
   it('throws on reserved prefix key', async () => {
-    await expect(act('dedupe:foo', async () => 1)).rejects.toThrow(/reserved prefix/)
-    await expect(act('cache:foo', async () => 1)).rejects.toThrow(/reserved prefix/)
-    await expect(act('inflight:foo', async () => 1)).rejects.toThrow(/reserved prefix/)
+    expect(() => act('dedupe:foo', async () => 1)).toThrow(/reserved prefix/)
+    expect(() => act('cache:foo', async () => 1)).toThrow(/reserved prefix/)
+    expect(() => act('inflight:foo', async () => 1)).toThrow(/reserved prefix/)
   })
 
   it('throws on non-integer retry.attempts', async () => {
-    await expect(act('k', async () => 1, { retry: { attempts: 1.5 } }))
-      .rejects.toThrow(/positive integer/)
-    await expect(act('k', async () => 1, { retry: { attempts: 0 } }))
-      .rejects.toThrow(/positive integer/)
-    await expect(act('k', async () => 1, { retry: { attempts: -3 } }))
-      .rejects.toThrow(/positive integer/)
+    expect(() => act('k', async () => 1, { retry: { attempts: 1.5 } })).toThrow(/positive integer/)
+    expect(() => act('k', async () => 1, { retry: { attempts: 0 } })).toThrow(/positive integer/)
+    expect(() => act('k', async () => 1, { retry: { attempts: -3 } })).toThrow(/positive integer/)
   })
 
   it('throws on non-positive timeout.ms', async () => {
-    await expect(act('k', async () => 1, { timeout: { ms: 0 } }))
-      .rejects.toThrow(/positive finite/)
-    await expect(act('k', async () => 1, { timeout: { ms: -100 } }))
-      .rejects.toThrow(/positive finite/)
-    await expect(act('k', async () => 1, { timeout: { ms: NaN } }))
-      .rejects.toThrow(/positive finite/)
+    expect(() => act('k', async () => 1, { timeout: { ms: 0 } })).toThrow(/positive finite/)
+    expect(() => act('k', async () => 1, { timeout: { ms: -100 } })).toThrow(/positive finite/)
+    expect(() => act('k', async () => 1, { timeout: { ms: NaN } })).toThrow(/positive finite/)
   })
 
   it('throws on non-positive cache.ttl', async () => {
-    await expect(act('k', async () => 1, { cache: { ttl: 0 } }))
-      .rejects.toThrow(/positive finite/)
+    expect(() => act('k', async () => 1, { cache: { ttl: 0 } })).toThrow(/positive finite/)
   })
 
   it('throws on non-AbortSignal signal option', async () => {
     // Cast through unknown to bypass TS for the runtime test
-    await expect(act('k', async () => 1, { signal: 'not-a-signal' as unknown as AbortSignal }))
-      .rejects.toThrow(/AbortSignal/)
+    expect(() => act('k', async () => 1, { signal: 'not-a-signal' as unknown as AbortSignal })).toThrow(/AbortSignal/)
   })
 })
 

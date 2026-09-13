@@ -461,10 +461,10 @@ describe('Debug6: key length boundaries', () => {
   })
 
   it('key with all reserved prefixes rejected', async () => {
-    await expect(act('dedupe:foo', async () => 1)).rejects.toThrow(/reserved prefix/)
-    await expect(act('cache:foo', async () => 1)).rejects.toThrow(/reserved prefix/)
-    await expect(act('inflight:foo', async () => 1)).rejects.toThrow(/reserved prefix/)
-    await expect(act('tenant:foo', async () => 1)).rejects.toThrow(/reserved prefix/)
+    expect(() => act('dedupe:foo', async () => 1)).toThrow(/reserved prefix/)
+    expect(() => act('cache:foo', async () => 1)).toThrow(/reserved prefix/)
+    expect(() => act('inflight:foo', async () => 1)).toThrow(/reserved prefix/)
+    expect(() => act('tenant:foo', async () => 1)).toThrow(/reserved prefix/)
   })
 })
 

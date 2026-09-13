@@ -1,14 +1,14 @@
 # actly
 
-A typed reliability kernel for async TypeScript. Retry, timeout, circuit breaker, bulkhead, rate limit, dedupe, cache, hedge, fallback, and graceful shutdown, all composed through one `act()` call that never rejects.
+A typed reliability kernel for async TypeScript. Retry, timeout, circuit breaker, bulkhead, rate limit, dedupe, cache, hedge, fallback, and graceful shutdown, all composed through one `act()` call that never rejects on runtime failures.
 
 ```bash
 npm install actly
 ```
 
-Node 20+. ESM + CJS. Zero runtime deps. 57 KB tarball, 243 KB JS runtime (335 KB installed with type defs). 12 policies in one `act()` call.
+Node 20+. ESM + CJS. Zero runtime deps. Minified single-file bundles for both formats: 66.1 KB tarball, 209 KB unpacked, 43 files (run `npm run size` for live numbers — this doc no longer hardcodes sizes that go stale). 12 policies in one `act()` call.
 
-> **Bundle note:** This is ~4× larger than [Cockatiel](https://github.com/vjkramer/cockatiel) (63 KB JS) because actly ships cache, dedupe, rate limit, hedge, audit log, multi-tenant isolation, drain, watchdog, and health check in the same package. If you only need retry/timeout/circuit-breaker/bulkhead/fallback and bundle size is critical, use Cockatiel. If you want the broader policy surface in one call, the size delta is the cost.
+> **Bundle note:** actly ships cache, dedupe, rate limit, hedge, audit log, multi-tenant isolation, drain, watchdog, and health check alongside the classic policies. If you only need retry/timeout/circuit-breaker/bulkhead/fallback and install size is critical, use [Cockatiel](https://github.com/vjkramer/cockatiel). Since 1.4 both runtime bundles are single minified files, and `sideEffects: false` lets bundlers tree-shake unused exports.
 
 ## Quick start
 
@@ -33,11 +33,23 @@ if (r.ok) {
 }
 ```
 
-`act()` always resolves. You branch on `r.ok` instead of try/catch around `await`. Failures are typed (see [Errors](#errors)) so you can switch on `r.error.code` for telemetry.
+`act()` always resolves **runtime** failures into `ActResult` — you branch on `r.ok` instead of try/catch around `await`. Programmer errors (invalid key or options) throw **synchronously** before any work starts, so config bugs surface at the call site. Failures are typed (see [Errors](#errors)) so you can switch on `r.error.code` for telemetry.
+
+## What's new in 1.4
+
+- **Hedge regression fixed (BUG-CORE-015, take two):** the default `outside-retry` placement aborted the *winner's* controller after it settled, cancelling live downstream side-effects. Only the loser is aborted now, on both placements, enforced by a single shared hedge race implementation.
+- **True CJS support:** the CJS entry in 1.3 only loaded on Node 22.12+/20.19+ via `require(esm)`. 1.4 ships a standalone minified CJS bundle that works on every Node 20+, and drops 27 dead `.cjs` interstitials (−121 KB) plus stale `dist/state` artifacts. Every error class pins its instance name, so `error.name` survives minification.
+- **Observability validation:** unknown hook names (e.g. `onSucess`) throw at call time, as originally promised. Silent telemetry loss from typos is gone.
+- **4.5× faster full-options path** (20.9 → 4.6 µs/op) and ~25% faster cache hits, from deferred timeout-error allocation, a shared never-aborted fast-path signal, and a frozen-options policy cache. Freeze your shared options objects for zero-allocation policy chains.
+- **Scoped `act` fast path:** `withStore()` calls with no options now skip policy machinery like the global `act()` always did.
+- **Policy factories are public and validated:** `retryPolicy`, `timeoutPolicy`, `totalTimeoutPolicy`, `dedupePolicy`, `cachePolicy`, `circuitBreakerPolicy`, `bulkheadPolicy`, `rateLimitPolicy`, `noopPolicy` — build custom chains with `execute()`. Every factory validates its options at construction with the same rules (and error messages) as `act()`, so `timeoutPolicy({ ms: Infinity })` or `cachePolicy({ ttl: 0 })` throw instead of silently misbehaving.
+- `dedupePolicy({ enabled: false })` is now a real pass-through on the `execute()` path; `createHealthCheck` accepts any store implementing the contract; `drain()`/`drainAll()` and `bulkheadPolicy()` validate their inputs; `AttemptEvent` fills `durationMs`/`error` after each attempt settles; decorator keys are collision-free under minification.
+- Deprecated: `shouldRetryResult` (inverted name — use `acceptResult`) and the `acquireController`/`releaseController`/`poolSize` pool (superseded by the shared fast-path signal). Both keep working until 2.0.
+- Package size: tarball 84 → 66.1 KB (-21%), unpacked 400 → 209 KB (-48%), 152 → 43 files.
 
 ## Features
 
-- **Retry** with exponential/linear/constant backoff, four jitter modes, custom `backoffFn` with per-call state, and `shouldRetryResult` for retrying on returned values (HTTP 500 without throwing)
+- **Retry** with exponential/linear/constant backoff, four jitter modes, custom `backoffFn` with per-call state, and `acceptResult` for retrying on returned values (HTTP 500 without throwing)
 - **Per-attempt timeout** with `race` (aggressive) or `cooperative` (gentle) strategies
 - **Total timeout** spanning the whole retry loop, not just one attempt
 - **Circuit breaker** with `consecutive` or `count` (sliding-window ratio) strategies, half-open probe, idle reset
@@ -115,13 +127,15 @@ The scoped `act` has the same signature as the default `act`, plus an `invalidat
 
 ### `execute(input)`
 
-Low-level execution engine for custom policy chains. Accepts `{ key, fn, policies, store, meta, signal, observability }`. Most callers should use `act()`.
+Low-level execution engine for custom policy chains. Accepts `{ key, fn, policies, store, meta, signal, observability }`. Most callers should use `act()`. Since 1.4 every policy factory (`retryPolicy`, `timeoutPolicy`, `dedupePolicy`, ...) is exported, so custom chains no longer need to reimplement them.
 
 ### `noopPolicy()`
 
 Passthrough policy. No retry, no timeout, no state. Useful for testing and conditional chains.
 
 ```ts
+import { retryPolicy, noopPolicy } from 'actly'
+
 const retry = isProd
   ? retryPolicy({ attempts: 3 })
   : noopPolicy()
@@ -146,7 +160,7 @@ class UserService {
 
 ### `createHealthCheck(store, options?)`
 
-Returns a function that produces a `HealthStatus` snapshot.
+Returns a function that produces a `HealthStatus` snapshot. `store` accepts anything implementing the store contract (since 1.4 — previously typed to the concrete `InMemoryStore` class); async stores report `storeSize: -1` because their `size()` is a Promise.
 
 ```ts
 import { createHealthCheck, InMemoryStore } from 'actly'
@@ -163,7 +177,7 @@ const status = health()
 
 ### `drain(timeoutMs, scope?)` and `drainAll(timeoutMs)`
 
-Wait for in-flight `act()` calls to settle. `drainAll` drains all scopes in parallel.
+Wait for in-flight `act()` calls to settle. `drainAll` drains all scopes in parallel. Since 1.4 both throw a `RangeError` on negative or non-finite `timeoutMs` (previously such values silently clamped to a ~1 ms timer).
 
 ```ts
 process.on('SIGTERM', async () => {
@@ -174,7 +188,7 @@ process.on('SIGTERM', async () => {
 
 ### `enableWatchdog(thresholdMs?, hooks?)`
 
-Opt-in background watchdog. Fires `onWatchdog` when an in-flight call exceeds `thresholdMs` (default 60s). Catches hung `fn` calls that ignore the signal and have no timeout configured.
+Opt-in background watchdog. Fires `onWatchdog` when an in-flight call exceeds `thresholdMs` (default 60s). Catches hung `fn` calls that ignore the signal and have no timeout configured. `thresholdMs` must be a positive finite number (NaN/Infinity would clamp the interval to a 1 ms busy loop), and `hooks` follow the same validation rules as `act()` observability hooks — a typo'd hook name throws.
 
 ```ts
 enableWatchdog(30_000, {
@@ -227,23 +241,25 @@ All fields optional. Compose any combination.
     maxDelay: 30_000,               // cap on computed delay (default Infinity)
     jitter: 'full',                 // 'none' | 'full' | 'equal' | 'decorrelated' (default 'full')
     shouldRetry: (error, attempt) => true,
-    shouldRetryResult: (value, attempt) => true,  // retry on returned values (HTTP 500)
+    acceptResult: (value, attempt) => true,  // retry on returned values (HTTP 500)
     backoffFn: (attempt, error, state) => 1000,   // custom backoff, overrides backoff+jitter
     dangerouslyUnref: false,        // unref sleep timer (CLI/scripts/tests)
   }
 }
 ```
 
-`shouldRetryResult` retries on returned values that are semantic failures. The common pattern: `fetch` returns a 500 without throwing.
+`acceptResult` retries on returned values that are semantic failures: return `true` to accept the value, `false` to retry it. The common pattern: `fetch` returns a 500 without throwing.
 
 ```ts
 await act('fetch-api', async (signal) => fetch('/api', { signal }), {
   retry: {
     attempts: 3,
-    shouldRetryResult: (res) => res.ok && res.status < 500,
+    acceptResult: (res) => res.ok && res.status < 500,
   },
 })
 ```
+
+> `shouldRetryResult` still works but is deprecated since 1.4 — the name reads inverted (it also means "accept"). Prefer `acceptResult`.
 
 `backoffFn` carries per-call state. Useful for honoring `Retry-After`.
 
@@ -294,8 +310,10 @@ Collapses concurrent calls with the same key into one in-flight Promise.
 
 ```ts
 dedupe: true
-// or
-dedupe: { enabled: true, inflightTtl: 30_000 }
+// or — the object form is enabled by default
+dedupe: { inflightTtl: 30_000 }
+// explicit opt-out
+dedupe: { enabled: false }
 ```
 
 `inflightTtl` (default 5 minutes) is a safety-net TTL for the in-flight entry. If the originator's Promise doesn't settle within this window, the entry is removed so subsequent callers can start fresh. Pass `Infinity` explicitly for the old "wait forever" behavior.
@@ -352,12 +370,14 @@ Caps in-flight concurrency per key.
   bulkhead: {
     maxConcurrent: 10,
     maxQueueSize: 100,         // default Infinity
-    queueTimeoutMs: 5_000,     // default Infinity
+    queueTimeoutMs: 5_000,     // default 0 = fail fast, no queue
   }
 }
 ```
 
-When `maxConcurrent` is reached, new callers queue. When the queue is full or `queueTimeoutMs` elapses, callers get `BulkheadOverflowError`. `onBackpressure` observability hook fires when queue utilization crosses 80%.
+When `maxConcurrent` is reached, new callers **reject immediately** — the default is fail-fast (`queueTimeoutMs: 0`), the safe choice under load. Set a positive `queueTimeoutMs` to queue excess callers instead; when the queue is full or the timeout elapses, callers get `BulkheadOverflowError`. `onBackpressure` observability hook fires when queue utilization crosses 80%.
+
+Options are validated at policy construction (since 1.4): non-finite or negative `queueTimeoutMs` throws instead of reaching `setTimeout` and clamping to a ~1 ms fire.
 
 ### `rateLimit`
 
@@ -383,7 +403,9 @@ Sends a second call after `delayMs`, races them, cancels the loser.
 
 `outside-retry` (default) wraps the whole execute chain. One hedge per `act()` call regardless of retry count. `inside-retry` wraps `fn` directly, so each retry attempt can spawn its own hedge (multiplies downstream load; rarely what you want).
 
-When one settles, the loser is aborted via its `AbortController`. If `fn` cooperates with the signal (passes it to `fetch`, DB drivers, etc.) the underlying work is cancelled. The winner's controller is not aborted, so downstream side-effects (streaming bodies, cursor cleanup) run to completion.
+If the primary *fails* before `delayMs` elapses, its error propagates and no hedge is launched — even when that error is itself a `HedgeTimeoutError` (e.g. rethrown from a nested actly call): a hedge is only ever launched on the time signal, never on an error, so a failing primary cannot silently double the downstream load.
+
+When one settles, the loser is aborted via its `AbortController`. If `fn` cooperates with the signal (passes it to `fetch`, DB drivers, etc.) the underlying work is cancelled. The winner's controller is not aborted, so downstream side-effects (streaming bodies, cursor cleanup) run to completion. This guarantee actually holds since 1.4 — the 1.3 implementation aborted the winner on the default placement; both placements now share one race implementation, so the guarantee cannot drift.
 
 ### `fallback`
 
@@ -395,11 +417,11 @@ Returns a value (or function result) instead of the failure when `fn` fails.
 { fallback: { value: () => computeFallback() } }
 ```
 
-If the fallback function itself throws, the original `fn` error is surfaced. The fallback error is logged via `console.warn` in non-production and emitted via `onFinalFailure` so you can detect a broken fallback.
+If the fallback function itself throws, the original `fn` error is surfaced — exactly one `onFinalFailure` event fires, with the original error as `error` and the fallback's error attached as `fallbackError`, so a broken fallback is detectable instead of invisible. The fallback error is also logged via `console.warn` in non-production, and `durationMs` includes the fallback's own runtime. A fallback without a `value` field throws `TypeError` at call time (it would otherwise resolve every failure as `ok: true` with `value: undefined`).
 
 ### `observability`
 
-Hooks fire on lifecycle events. Wrapped in `safeCall` so a buggy hook never crashes the main path.
+Hooks fire on lifecycle events. Wrapped in `safeCall` so a buggy hook never crashes the main path. Unknown hook names throw synchronously at call time (since 1.4), so a typo like `onSucess` fails loudly instead of silently dropping telemetry.
 
 ```ts
 {
@@ -454,7 +476,7 @@ All actly-thrown errors extend `ActlyError` and carry a stable `.code` string. U
 | `BulkheadOverflowError` | `ACTLY_BULKHEAD_FULL` | bulkhead queue full or timed out |
 | `RateLimitError` | `ACTLY_RATE_LIMIT` | rate limit exceeded |
 | `ResourceExhaustedError` | `ACTLY_RESOURCE_EXHAUSTED` | process-wide inflight budget exceeded |
-| `HedgeTimeoutError` | `ACTLY_HEDGE_TIMEOUT` | hedge deadline fired before primary settled |
+| `HedgeTimeoutError` | `ACTLY_HEDGE_TIMEOUT` | user-constructed: marks a downstream hedge deadline (nested actly calls); actly's own window never throws it |
 
 `ActlyError.toJSON({ redact?: true })` returns a plain object with `name`, `code`, `message`, `key`, `stack`, plus subclass-specific fields (`attempts`, `ms`, `current`, `limit`, etc.). Pass `redact: true` to HTML-escape and length-cap the message for log shipping.
 
@@ -468,41 +490,33 @@ Both are typed, zero-dependency resilience libraries for Node/TypeScript. Both u
 | Cross-call state | Yes (keyed store: cache, dedupe, breaker counter, rate limit) | No (policies are stateless per-instance) |
 | Multi-tenant isolation | Yes (`createTenantStore`) | No |
 | Audit log / health / drain / watchdog | Built-in | External |
-| Tarball size | 57 KB | ~30 KB |
-| JS runtime (installed) | 243 KB | 63 KB (~4× smaller) |
-| Per-call overhead (retry configured) | ~2.4 µs | ~0.35 µs (~7× faster) |
+| Tarball size | 66.1 KB | ~30 KB |
+| Runtime JS (minified bundle) | ~44 KB single file | ~63 KB |
 | Runtime deps | 0 | 0 |
 
-Where they overlap (retry, timeout, circuit breaker, bulkhead), semantics are comparable. actly uses a keyed state store (`Map` get/set per call) to support cross-call features (circuit breaker failure counts, cache, dedupe) that Cockatiel doesn't have. That indirection costs a few microseconds per call and the extra code adds bundle weight.
+Where they overlap (retry, timeout, circuit breaker, bulkhead), semantics are comparable. actly uses a keyed state store (`Map` get/set per call) to support cross-call features (circuit breaker failure counts, cache, dedupe) that Cockatiel doesn't have. That indirection costs a few microseconds per call.
 
-For wrapping network or database calls (what both libraries are for), the per-call overhead difference is noise — a single intra-region AWS RTT is ~1,000 µs, so a 2 µs delta is 0.2% of one network hop. But for in-process cache layers or routers at 100k+ calls/sec, the overhead and bundle size matter; pick Cockatiel there.
+For wrapping network or database calls (what both libraries are for), the per-call overhead difference is noise — a single intra-region AWS RTT is ~1,000 µs, so a microsecond delta is a fraction of one network hop. But for in-process cache layers or routers at 100k+ calls/sec, the per-call cost matters; pick Cockatiel there.
 
-Pick actly when you want cache/dedupe/rate-limit/hedge/audit/multi-tenant in the same call and can absorb the bundle cost. Pick Cockatiel when you only need retry/timeout/circuit-breaker/bulkhead/fallback and want the leanest per-call cost and smallest install footprint.
+Pick actly when you want cache/dedupe/rate-limit/hedge/audit/multi-tenant in the same call. Pick Cockatiel when you only need retry/timeout/circuit-breaker/bulkhead/fallback and want the leanest per-call cost.
 
 ## Performance
 
-Numbers from `npm run bench` on a 2023 MacBook Pro with Node 22. 20,000 iterations, 500 warmup. Live sandbox re-run (Node 24) confirms the same shape.
+Measured with `npm run bench` (100,000 iterations, 1,000 warmup, Node 24, single-threaded). Re-run it yourself; the numbers below are from the 1.4 release verification. The 1.3→1.4 gains come from deferred timeout-error allocation, the shared fast-path signal, and the frozen-options policy cache.
 
-| Configuration | ops/sec | µs/op | Notes |
+| Configuration | v1.3 µs/op | v1.4 µs/op | Notes |
 |---|---|---|---|
-| Fast path (zero options) | ~680,000 | ~1.5 | Just `act(key, fn)`, no policies applied |
-| Cache hit | ~700,000 | ~1.4 | Single-flight in-memory store |
-| Retry only (attempts=3) | ~415,000 | ~2.4 | Same as the Quick Start example |
-| Circuit breaker (closed) | ~720,000 | ~1.4 | Happy path, breaker not tripped |
-| Bulkhead (maxConcurrent=10) | ~313,000 | ~3.2 | Under cap, no queuing |
-| Composed (retry+timeout+breaker) | ~84,000 | ~11.9 | The realistic case |
+| Fast path (zero options) | 1.44 | 1.44 | ~695,000 ops/sec; dominated by the async call itself |
+| Full options (timeout + totalTimeout) | 20.98 | 4.68 | **4.5× faster**; the realistic policy case |
+| Cache hit | 1.79 | 1.33 | ~25% faster; single-flight store |
+| With caller signal | 2.24 | 2.24 | Listener hygiene is not free but not degrading |
+| Empty observability object | 1.66 | 1.70 | Null-checked away when no hooks are set |
 
-**Cockatiel comparison (same sandbox, same workload):**
+**Tips for the hottest paths:**
 
-| Configuration | actly ops/sec | Cockatiel ops/sec | actly overhead |
-|---|---|---|---|
-| Retry | 415,000 | 2,835,000 | 6.8× slower |
-| Timeout | 87,000 | 177,000 | 2.0× slower |
-| Circuit breaker | 722,000 | 2,272,000 | 3.1× slower |
-| Bulkhead | 313,000 | 5,533,000 | 17.7× slower |
-| Composed (3 policies) | 84,000 | 156,000 | 1.9× slower |
-
-The composed case is the closest to a real workload. The 1.9× delta is microseconds, not milliseconds — invisible behind a 50ms network call. The bulkhead 17.7× delta is the worst case and matters only for in-process routers; if your `fn` is a no-op or in-memory lookup, the bulkhead machinery dominates total time.
+- Call `act(key, fn)` with no options when you need none — it takes the fast path (shared never-aborted signal, no controllers, no policy array).
+- `Object.freeze()` your shared options objects: frozen options get their policy chain built once and reused (WeakMap cache), eliminating per-call policy construction.
+- Observability hooks cost nothing until they fire; an empty hooks object is detected and skipped.
 
 Observability hooks have zero overhead when not configured. When configured, `safeCall` wraps every hook invocation so a buggy hook never propagates into the main path.
 

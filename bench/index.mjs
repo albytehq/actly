@@ -60,7 +60,7 @@ async function benchAsync(name, fn, iters = ITERS) {
   )
 }
 
-console.log('=== actly v1.2.0 benchmarks ===\n')
+console.log('=== actly benchmarks ===\n')
 
 // ─── Synchronous-style ops ───────────────────────────────────────────────────
 
@@ -84,7 +84,7 @@ console.log('— InMemoryStore primitives —')
 console.log('\n— Validation primitives —')
 {
   // Direct calls to sanitiser — bypasses act() to measure pure validation cost.
-  const { sanitizeKey } = await import('../dist/utils/key.js')
+  const { sanitizeKey } = await import('../dist/index.js')
   bench('sanitizeKey() (valid)', () => { sanitizeKey('user:42') })
   bench('sanitizeKey() (reject, throws)', () => {
     try { sanitizeKey('__proto__') } catch {}

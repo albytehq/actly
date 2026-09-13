@@ -17,35 +17,35 @@ export function unregisterDrainable(scope = 'default'): void {
   const s = getState(scope)
   s.inflight = Math.max(0, s.inflight - 1)
   if (s.inflight === 0) {
-    for (const r of s.resolvers) r()
-    s.resolvers = []
-    // prune scoped drain state when idle so high-cardinality scenarios
-    // (per-request SSR, per-tenant stores, dynamic tenant lifecycle) don't
-    // grow the Map unbounded. The 'default' scope is reused on every act()
-    // call, so deleting and re-creating it would double the Map ops per
-    // call (~30% fast-path regression). Scoped entries are NOT reused;
-    // once idle they're dead weight until GC.
+    if (s.resolvers.length > 0) {
+      for (const r of s.resolvers) r()
+      s.resolvers.length = 0
+    }
+    // prune scoped entries when idle; 'default' is reused on every act()
+    // call, so delete+recreate would double the Map ops per call
     if (scope !== 'default') {
       drainStates.delete(scope)
     }
   }
 }
 
+function assertTimeoutMs(timeoutMs: number): void {
+  if (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs < 0) {
+    throw new RangeError(
+      `Actly: drain timeoutMs must be a non-negative finite number, got ${timeoutMs}`,
+    )
+  }
+}
+
 /**
  * Wait for all in-flight act() calls in this scope to settle.
- * Returns true if all settled within timeoutMs, false if timed out.
- *
- * Uses `drainStates.get` directly (no create-on-read) so drain-only access
- * on a never-registered scope (e.g. a typo'd tenant ID) doesn't leave an
- * empty entry in the Map forever.
+ * @returns true if all settled within `timeoutMs`, false on timeout.
  */
 export async function drain(timeoutMs: number, scope = 'default'): Promise<boolean> {
+  assertTimeoutMs(timeoutMs)
   const s = drainStates.get(scope)
-  if (!s) return true // scope never registered - nothing to drain.
+  if (!s) return true // scope never registered - nothing to drain
   if (s.inflight === 0) {
-    // if the scope is non-default and has no resolvers, prune it (mirror
-    // the unregisterDrainable idle-prune so drain-only access doesn't
-    // accumulate stale entries).
     if (scope !== 'default' && s.resolvers.length === 0) {
       drainStates.delete(scope)
     }
@@ -76,33 +76,24 @@ export async function drain(timeoutMs: number, scope = 'default'): Promise<boole
 
 /**
  * Wait for all in-flight act() calls across ALL scopes to settle.
- * Returns true if all settled within timeoutMs, false if any timed out.
  *
  * @example
  * // K8s preStop hook
  * process.on('SIGTERM', async () => {
  *   const allSettled = await drainAll(10_000)
- *   if (!allSettled) {
- *     console.warn('Actly: drain timed out, force-exiting with in-flight calls')
- *   }
  *   process.exit(allSettled ? 0 : 1)
  * })
  *
- * @param timeoutMs Max time to wait across all scopes (each scope gets
- *                  the full `timeoutMs`; they drain in parallel, not
- *                  sequentially).
- * @returns true if ALL scopes settled within `timeoutMs`, false if any
- *          timed out.
+ * @param timeoutMs Max wait per scope; scopes drain in parallel.
+ * @returns true if every scope settled within `timeoutMs`.
  */
 export async function drainAll(timeoutMs: number): Promise<boolean> {
-  // Snapshot the scope keys. drain() on a scope that doesn't exist is a
-  // no-op (returns true immediately), so new scopes created during
-  // iteration don't cause issues.
+  assertTimeoutMs(timeoutMs)
   const scopes = Array.from(drainStates.keys())
   if (scopes.length === 0) return true
 
   const results = await Promise.all(
-    scopes.map(scope => drain(timeoutMs, scope)),
+    scopes.map((scope) => drain(timeoutMs, scope)),
   )
-  return results.every(r => r === true)
+  return results.every((r) => r === true)
 }

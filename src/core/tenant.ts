@@ -1,24 +1,17 @@
 import { InMemoryStore } from '../stores/memory.js'
 import { withStore } from './act.js'
 import type { ScopedActSync, ScopedActAsync } from './act.js'
-import type { AsyncStateStore } from '../stores/base.js'
-import { LIMITS } from '../utils/limits.js'
+import type { AsyncStateStore } from '../stores/contract.js'
+import { LIMITS } from '../limits.js'
 
 export interface TenantStoreOptions {
   maxSize?: number
   autoCleanup?: boolean
   cleanupIntervalMs?: number
   /**
-   * Max tenants tracked by the manager. When `get(tenantId)` would create a
-   * new tenant that exceeds this cap, the manager evicts the
-   * least-recently-used tenant (calling `store.destroy()` first to release
-   * its cleanup interval + Map). The `Map` preserves insertion order in JS,
-   * so a `delete + set` cycle moves a tenant to the MRU position on access:
-   * true LRU semantics.
-   *
-   * Defaults to `LIMITS.MAX_TENANTS` (10 000). Pass `Infinity` for
-   * unbounded (not recommended; leaks memory + intervals under high
-   * cardinality).
+   * Max tenants tracked. `get()` evicts the least-recently-used tenant
+   * (destroying its store) when the cap is exceeded. Default
+   * `LIMITS.MAX_TENANTS` (10 000); pass `Infinity` for unbounded.
    */
   maxTenants?: number
 }
@@ -31,13 +24,9 @@ export interface TenantManager {
 }
 
 /**
- * Manages per-tenant stores for multi-tenant isolation. Each tenant gets
- * its own InMemoryStore; cache/dedupe entries cannot leak across tenants.
- *
- * Bounded by `maxTenants` (default 10 000) with LRU eviction. Without the
- * bound, a SaaS that creates a tenant store per request or per user-session
- * would accumulate tenant entries + their cleanup intervals for the
- * lifetime of the process.
+ * Per-tenant store isolation: each tenant gets its own InMemoryStore, so
+ * cache/dedupe entries cannot leak across tenants. Bounded by `maxTenants`
+ * with LRU eviction (Map delete+set refreshes recency).
  */
 export function createTenantStore(options: TenantStoreOptions = {}): TenantManager {
   const maxSize = options.maxSize ?? LIMITS.DEFAULT_STORE_MAX_SIZE
@@ -51,15 +40,11 @@ export function createTenantStore(options: TenantStoreOptions = {}): TenantManag
     get(tenantId: string) {
       let entry = tenants.get(tenantId)
       if (entry) {
-        // LRU refresh: delete+set moves to MRU so eviction tracks recent
-        // access, not insertion order.
         tenants.delete(tenantId)
         tenants.set(tenantId, entry)
         return entry.scoped
       }
-      // New tenant; check capacity and evict LRU if needed.
       if (maxTenants !== Number.POSITIVE_INFINITY && tenants.size >= maxTenants) {
-        // Map iteration order is insertion order; first key is LRU.
         const lruId = tenants.keys().next().value
         if (lruId !== undefined) {
           const lru = tenants.get(lruId)
@@ -98,9 +83,9 @@ export function createTenantStore(options: TenantStoreOptions = {}): TenantManag
 }
 
 /**
- * Async tenant manager for async stores (Redis, DynamoDB, etc). Each tenant
- * gets its own store instance with prefixed keys. Bounded by `maxTenants`
- * (default 10 000) with LRU eviction; mirrors the sync `createTenantStore`.
+ * Async tenant manager: each tenant gets its own store instance from
+ * `storeFactory` (Redis, DynamoDB, ...). Same bounded-LRU semantics as
+ * {@link createTenantStore}; `destroy()` is best-effort on every store.
  */
 export function createAsyncTenantStore(
   storeFactory: (tenantId: string) => AsyncStateStore,
@@ -121,7 +106,7 @@ export function createAsyncTenantStore(
         ;(result as Promise<void>).catch(() => {})
       }
     } catch {
-      // best-effort cleanup; ignore throw.
+      // best-effort
     }
   }
 
@@ -129,12 +114,10 @@ export function createAsyncTenantStore(
     get(tenantId: string) {
       let entry = tenants.get(tenantId)
       if (entry) {
-        // LRU refresh.
         tenants.delete(tenantId)
         tenants.set(tenantId, entry)
         return entry.scoped
       }
-      // New tenant; check capacity and evict LRU if needed.
       if (maxTenants !== Number.POSITIVE_INFINITY && tenants.size >= maxTenants) {
         const lruId = tenants.keys().next().value
         if (lruId !== undefined) {
@@ -151,11 +134,6 @@ export function createAsyncTenantStore(
     },
 
     evict(tenantId: string) {
-      // call destroy() on the evicted store so it can release its resources
-      // (Redis connection, DynamoDB doc client, timer, etc.). Without this,
-      // a multi-tenant SaaS that creates/evicts tenants at runtime leaks a
-      // connection pool per eviction; eventually exhausts file descriptors /
-      // connections.
       const entry = tenants.get(tenantId)
       if (entry) {
         safeDestroy(entry.store)
@@ -167,8 +145,6 @@ export function createAsyncTenantStore(
       return tenants.size
     },
 
-    // destroy all tenant stores; without this, async tenant stores
-    // (Redis clients etc.) leak when the manager itself is torn down.
     destroy() {
       for (const [, entry] of tenants) {
         safeDestroy(entry.store)

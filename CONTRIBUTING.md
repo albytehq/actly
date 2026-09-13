@@ -14,7 +14,7 @@ Enforced by ESLint (`npm run lint`) and review. PRs that violate these are block
 
 **Error classes**: PascalCase with `Error` suffix. `TimeoutError`, `RetryExhaustedError`, `HedgeTimeoutError`. Each carries a stable `.code` string for cross-realm telemetry. Internal error classes still follow the rule.
 
-**Constants**: SCREAMING_SNAKE_CASE for module-level constants. `MAX_RETRY_ATTEMPTS`, `CACHE_NS`. Numeric bounds go in the `LIMITS` object (`utils/limits.ts`), not ad-hoc elsewhere.
+**Constants**: SCREAMING_SNAKE_CASE for module-level constants. `MAX_RETRY_ATTEMPTS`, `CACHE_NS`. Numeric bounds go in the `LIMITS` object (/`src/limits.ts`/), not ad-hoc elsewhere.
 
 **No double underscore** in new code. `__proto__` is a JS language feature. The `__` prefix is reserved for the language. Use an `Error` subclass or a `Symbol` for internal sentinels.
 
@@ -36,15 +36,7 @@ Enforced by ESLint (`npm run lint`) and review. PRs that violate these are block
 
 ### Categories
 
-Tests live under `src/__tests__/`. Organized by intent:
-
-- `unit/` single-function tests, no I/O
-- `integration/` multi-policy composition
-- `regression/` bug-specific tests
-- `property/` property-based tests via `fast-check`
-- `stress/` real concurrency, 1M+ ops, memory-flat assertions
-- `conformance/` store contract conformance (for custom store authors)
-- `e2e/` full real-world scenarios
+Tests live under `src/__tests__/` as a flat set of files named after intent (`regression-suite.test.ts`, `hedge-circuit-bulkhead.test.ts`, `v14-fixes.test.ts`, ...). Bug-specific regression tests carry the bug ID in the test name. Property-based tests use `fast-check` inline. `scripts/verify-dist.mjs` tortures the built bundle in both module formats; `scripts/stress.mjs` runs concurrency, abort-storm, and memory checks against the build.
 
 ### Coverage
 
@@ -85,7 +77,7 @@ Breaking changes require:
 `npm publish` runs `prepublishOnly` automatically:
 
 ```json
-"prepublishOnly": "npm run typecheck && npm test && npm run build"
+"prepublishOnly": "npm run typecheck && npm run lint && npm test && npm run build"
 ```
 
 A broken publish is impossible if this hook is in place and the local environment is clean.

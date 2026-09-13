@@ -392,7 +392,7 @@ describe('H13: @usePolicy decorator', () => {
     // simple test: decorators require experimentalDecorators or stage-3.
     // we test the underlying mechanism by importing usePolicy and applying
     // it manually.
-    const { usePolicy } = await import('../utils/decorator.js')
+    const { usePolicy } = await import('../usePolicy.js')
 
     class TestService {
       async fetchUser(signal: AbortSignal, id: string): Promise<string> {
@@ -416,7 +416,7 @@ describe('H13: @usePolicy decorator', () => {
   })
 
   it('retries on failure', async () => {
-    const { usePolicy } = await import('../utils/decorator.js')
+    const { usePolicy } = await import('../usePolicy.js')
     let calls = 0
 
     class TestService {
@@ -445,7 +445,7 @@ describe('H13: @usePolicy decorator', () => {
   })
 
   it('throws on exhausted retries', async () => {
-    const { usePolicy } = await import('../utils/decorator.js')
+    const { usePolicy } = await import('../usePolicy.js')
 
     class TestService {
       async alwaysFail(_signal: AbortSignal): Promise<string> {

@@ -1,21 +1,15 @@
-import type { InMemoryStore } from '../stores/memory.js'
-import type { AnyStateStore } from '../types/index.js'
-import { LIMITS } from '../utils/limits.js'
+import type { AnyStateStore } from '../types.js'
+import { isSyncStore } from '../stores/contract.js'
+import { LIMITS } from '../limits.js'
 import { ResourceExhaustedError } from '../errors.js'
 import type { ObservabilityHooks, WatchdogEvent } from '../observability.js'
-import { safeCall } from '../utils/safeCall.js'
+import { assertObservabilityHooks } from '../validate.js'
+import { safeCall } from '../safeCall.js'
 
 /**
- * Map a store instance to the scope `withStore()` uses internally for it.
- *
- * `withStore()` registers its `'scoped:<uuid>'` scope here so
- * `createHealthCheck(store)` can resolve the scope automatically. Without
- * this lookup, `withStore(store)` + `createHealthCheck(store)` (a common
- * pattern) silently reads the `'default'` scope and misses every error /
- * inflight event the scoped `act()` records.
- *
- * WeakMap keys don't keep the store alive: once destroyed + dropped, the
- * entry is reclaimed automatically.
+ * Map a store instance to the scope `withStore()` uses for it, so
+ * `createHealthCheck(store)` resolves the scope automatically. WeakMap keys
+ * do not keep the store alive.
  */
 const storeScopes = new WeakMap<object, string>()
 
@@ -25,20 +19,16 @@ export function registerStoreScope(store: AnyStateStore, scope: string): void {
 }
 
 /**
- * Resolve the scope for a store, if one was registered via `withStore()`.
- * Returns `undefined` for the default store (which uses scope `'default'`).
+ * Resolve the scope registered for a store, if any; undefined for the
+ * default store (scope `'default'`).
  */
 export function resolveStoreScope(store: AnyStateStore): string | undefined {
   return storeScopes.get(store as unknown as object)
 }
 
-/**
- * Health status for a single scope. Each scope gets its own HealthState
- * entry in a Map; createHealthCheck reads only from the specified scope
- * (default: 'default').
- */
+/** Health status for a single scope. */
 export interface HealthStatus {
-  /** Live entry count in the associated store. */
+  /** Live entry count in the associated store. `-1` for async stores. */
   storeSize: number
   /** Number of in-flight act() calls in this scope. */
   pendingInflight: number
@@ -56,57 +46,38 @@ interface HealthState {
   lastSuccessAt?: number
 }
 
-// per-scope state (one entry per scope key).
 const healthStates = new Map<string, HealthState>()
 const startTime = Date.now()
 
 // process-wide in-flight budget; prevents self-DoS from runaway callers.
-// Opt out via ACTLY_NO_INFLIGHT_LIMIT=1. Cached as module-level consts so
-// V8 can constant-fold the disabled check (reading LIMITS + process.env
-// on every call caused deopt).
+// Opt out via ACTLY_NO_INFLIGHT_LIMIT=1 before the first act() call.
+// Cached as module-level consts so V8 constant-folds the disabled check.
 const INFLIGHT_LIMIT_DISABLED =
   process.env.ACTLY_NO_INFLIGHT_LIMIT === '1' ||
   process.env.ACTLY_NO_INFLIGHT_LIMIT === 'true'
 const INFLIGHT_LIMIT = LIMITS.MAX_GLOBAL_INFLIGHT
 let globalInflightCount = 0
 
-// watchdog: tracks the START of the current "busy period" (the 0→1
-// transition of globalInflightCount). Updating a timestamp on every
-// register/unregister would refresh under sustained churn so the watchdog
-// never fired even when individual fns were hung. Tracking the busy-period
-// start means a stuck fn holding the period open trips the watchdog even
-// when mixed with healthy traffic.
-//
-// False positives under legitimately-sustained load are acceptable (the
-// warning says "if this persists, a fn may be hung"); false negatives on a
-// truly stuck call are not.
+// Watchdog busy-period tracking: the START of the 0→1 transition, not a
+// per-call timestamp — refreshing under churn would never fire even when
+// individual fns are hung.
 let inflightBusySince: number | undefined
 let watchdogTimer: ReturnType<typeof setInterval> | undefined
 let watchdogThresholdMs = 60_000
 const watchdogHooks = new Set<ObservabilityHooks>()
-// track which busy-period the watchdog already fired on so a stuck fn
-// doesn't page operators every intervalMs for the whole stuck duration.
-// Reset when the busy period ends (inflight → 0).
+// which busy-period the watchdog already fired on, so a stuck fn does not
+// page operators every interval for the whole stuck duration
 let watchdogFiredForBusySince: number | undefined
 
-/**
- * Mark the start of a busy period if we just transitioned from 0 → >0.
- * Called from `registerInflight` AFTER the increment.
- */
 function noteInflightUp(): void {
   if (inflightBusySince === undefined) {
     inflightBusySince = Date.now()
   }
 }
 
-/**
- * Clear the busy period marker if we just transitioned from >0 → 0.
- * Called from `unregisterInflight` AFTER the decrement.
- */
 function noteInflightDown(): void {
   if (globalInflightCount === 0) {
     inflightBusySince = undefined
-    // reset the "already fired" flag so the next busy period can fire.
     watchdogFiredForBusySince = undefined
   }
 }
@@ -121,9 +92,6 @@ function getState(scope: string): HealthState {
 }
 
 export function registerInflight(scope: string): void {
-  // enforce the budget BEFORE incrementing. Cached consts let V8
-  // constant-fold the disabled check; the remaining comparison is a single
-  // integer compare.
   if (!INFLIGHT_LIMIT_DISABLED && globalInflightCount >= INFLIGHT_LIMIT) {
     throw new ResourceExhaustedError(globalInflightCount, INFLIGHT_LIMIT)
   }
@@ -137,64 +105,59 @@ export function unregisterInflight(scope: string): void {
   noteInflightDown()
   const s = getState(scope)
   s.inflight = Math.max(0, s.inflight - 1)
-  // prune idle scope entries so high-cardinality multi-tenant scenarios
-  // (50k tenants) don't grow the Map unbounded. When inflight reaches 0 AND
-  // there's no lastError, delete the entry; getState() recreates it lazily.
-  // The 'default' scope is never pruned (reused on every act() call).
+  // prune idle scopes so high-cardinality multi-tenant scenarios do not
+  // grow the Map unbounded; 'default' is reused every call and stays
   if (s.inflight === 0 && s.lastError === undefined && scope !== 'default') {
     healthStates.delete(scope)
   }
 }
 
 /**
- * Enable the in-flight watchdog. A background interval (unref'd) checks
- * every `thresholdMs / 4` whether any in-flight act() has been pending
- * longer than `thresholdMs`; if so, fires `onWatchdog` on every registered
- * ObservabilityHooks object.
+ * Enable the in-flight watchdog: an unref'd background interval fires
+ * `onWatchdog` once per busy period when in-flight work has been pending
+ * longer than `thresholdMs`. Opt-in — the per-attempt `timeout` policy
+ * covers most workloads.
  *
- * Opt-in: for most workloads the per-attempt `timeout` policy is enough.
- * The watchdog catches `fn` calls that ignore the signal AND have no
- * timeout configured.
+ * `thresholdMs` must be a positive finite number (validated since 1.4):
+ * `NaN` or `Infinity` would reach `setInterval`, which clamps them to a
+ * 1 ms busy loop, and a `NaN` threshold also fires the watchdog on every
+ * tick. `hooks` are validated with the same rules as `act()`'s
+ * observability hooks (typo'd hook names are rejected).
  *
- * @param thresholdMs Pending threshold before the watchdog fires. Default 60s.
- * @param hooks       Hooks to fire onWatchdog on. Can also be passed to
- *                    act() calls; the watchdog fires on it independently.
+ * @param thresholdMs Pending threshold before firing. Default 60s.
+ * @param hooks       Hooks to fire on; also registrable via
+ *                    {@link registerWatchdogHooks}.
  */
 export function enableWatchdog(
   thresholdMs = 60_000,
   hooks?: ObservabilityHooks,
 ): void {
-  // if the threshold changes, recreate the interval so check frequency
-  // matches the new threshold. Otherwise the first call fixes the interval
-  // forever: enableWatchdog(100) after enableWatchdog(60_000) would leave
-  // the interval at 15s, defeating the 100ms threshold.
+  if (typeof thresholdMs !== 'number' || !Number.isFinite(thresholdMs) || thresholdMs <= 0) {
+    throw new RangeError(
+      `Actly: enableWatchdog thresholdMs must be a positive finite number, got ${thresholdMs}`,
+    )
+  }
+  if (hooks) assertObservabilityHooks(hooks)
+  // recreate the interval on a threshold change so the check frequency
+  // matches the new threshold
   const prevThreshold = watchdogThresholdMs
   watchdogThresholdMs = thresholdMs
   if (hooks) watchdogHooks.add(hooks)
-  if (watchdogTimer && thresholdMs === prevThreshold) return // already enabled, no change
+  if (watchdogTimer && thresholdMs === prevThreshold) return
   if (watchdogTimer) {
     clearInterval(watchdogTimer)
     watchdogTimer = undefined
   }
 
-  // Check every thresholdMs/4. For small thresholds (test scenarios with
-  // thresholdMs=100), use thresholdMs directly to ensure timely firing.
-  // Minimum 50ms prevents excessive CPU usage on tiny thresholds.
   const intervalMs = Math.max(50, Math.floor(thresholdMs / 4))
   watchdogTimer = setInterval(() => {
     if (globalInflightCount === 0) return
     if (inflightBusySince === undefined) return
     const elapsed = Date.now() - inflightBusySince
     if (elapsed < watchdogThresholdMs) return
-    // fire ONCE per busy period. Without this, a stuck fn pages operators
-    // every intervalMs for the entire stuck duration (a 10-min stuck fn
-    // produced ~40 events at the default 15s interval). Now we fire once
-    // when the threshold is first crossed, then stay quiet until the busy
-    // period ends (inflight → 0) and a new one starts.
     if (watchdogFiredForBusySince === inflightBusySince) return
     watchdogFiredForBusySince = inflightBusySince
 
-    // Busy period exceeded threshold; emit watchdog event.
     const event: WatchdogEvent = {
       type: 'watchdog',
       key: '<unknown>',
@@ -208,36 +171,31 @@ export function enableWatchdog(
     }
   }, intervalMs)
 
-  // unref so the watchdog doesn't keep the process alive on its own.
   const t = watchdogTimer as unknown as { unref?: () => void }
   if (typeof t.unref === 'function') t.unref()
 }
 
 /**
- * Register an `ObservabilityHooks` object to receive `onWatchdog` events.
- * The hooks object can also be passed to act() calls; the watchdog fires
- * on it independently of any specific act() call.
+ * Register an `ObservabilityHooks` object to receive `onWatchdog` events
+ * without passing it to every act() call. Same validation rules as
+ * `act()`'s observability hooks: unknown hook names (typos) and
+ * non-function values throw.
  */
 export function registerWatchdogHooks(hooks: ObservabilityHooks): void {
+  assertObservabilityHooks(hooks)
   watchdogHooks.add(hooks)
 }
 
 /**
- * Unregister a previously-registered `ObservabilityHooks` object so it
- * stops receiving `onWatchdog` events. No-op if never registered.
- *
- * Without this, long-running processes that pass fresh hooks objects per
- * request (e.g. a per-request logger) accumulate closures in the
- * `watchdogHooks` Set forever: a slow memory leak.
+ * Unregister a previously-registered hooks object. No-op if never
+ * registered. Without this, per-request hooks objects accumulate in the
+ * Set forever (a slow leak).
  */
 export function unregisterWatchdogHooks(hooks: ObservabilityHooks): void {
   watchdogHooks.delete(hooks)
 }
 
-/**
- * Disable the watchdog and clear all registered hooks.
- * Safe to call multiple times.
- */
+/** Disable the watchdog and clear all registered hooks. Idempotent. */
 export function disableWatchdog(): void {
   if (watchdogTimer) {
     clearInterval(watchdogTimer)
@@ -257,7 +215,7 @@ export function recordSuccess(scope: string): void {
 
 /**
  * Health check function returned by {@link createHealthCheck}.
- * Call `()` to get a snapshot. Call `.dispose()` to stop the probe timer.
+ * Call `()` for a snapshot; call `.dispose()` to stop the probe timer.
  */
 export interface HealthCheckFn {
   (): HealthStatus
@@ -266,35 +224,34 @@ export interface HealthCheckFn {
 }
 
 /**
- * Create a health check function for a specific store + scope.
+ * Create a health check for a store + scope.
  *
- * @param store   The store to report `storeSize` from.
+ * @param store   Store to report `storeSize` from. Any store implementing
+ *                the store contract works (since 1.4 — previously typed
+ *                as the concrete InMemoryStore class). Async stores report
+ *                `storeSize: -1` because `size()` is a Promise there.
  * @param scope   Which scope's inflight/error/success data to report.
- *                Default 'default' (the scope used by `act()` without
- *                `withStore`). For scoped stores, pass the same scope
- *                string the scoped `act()` uses; typically the scope ID
- *                returned internally by `withStore`.
- *
- * The `scope` parameter is respected; the health check reports data only
- * for the named scope. Optional `probeIntervalMs` schedules a periodic
- * probe that emits a console.warn when an inflight slot is held > 60s
- * (useful for long-running processes where a stuck fn would otherwise
- * hold a slot forever). The returned function has a `.dispose()` method
- * that stops the probe timer.
+ *                Defaults to the scope `withStore()` registered for this
+ *                store, then `'default'`.
+ * @param options.probeIntervalMs Optional periodic probe that warns when
+ *                an inflight slot is held; the returned function's
+ *                `.dispose()` stops it.
  */
 export function createHealthCheck(
-  store: InMemoryStore,
+  store: AnyStateStore,
   options?: { scope?: string; probeIntervalMs?: number },
 ): HealthCheckFn {
-  // Resolve scope in priority order: explicit option > scope registered by
-  // withStore() for this store > 'default'. This closes the foot-gun where
-  // withStore(store) + createHealthCheck(store) read different scopes and
-  // the health check silently reports stale data.
   const scope = options?.scope ?? resolveStoreScope(store) ?? 'default'
   const probeIntervalMs = options?.probeIntervalMs
+  if (probeIntervalMs !== undefined &&
+      (typeof probeIntervalMs !== 'number' || !Number.isFinite(probeIntervalMs) || probeIntervalMs <= 0)) {
+    throw new RangeError(
+      `Actly: probeIntervalMs must be a positive finite number when provided, got ${probeIntervalMs}`,
+    )
+  }
 
   let probeTimer: ReturnType<typeof setInterval> | undefined
-  if (probeIntervalMs && probeIntervalMs > 0) {
+  if (probeIntervalMs) {
     probeTimer = setInterval(() => {
       const s = healthStates.get(scope)
       if (s && s.inflight > 0) {
@@ -311,7 +268,7 @@ export function createHealthCheck(
   const checkFn = (): HealthStatus => {
     const s = healthStates.get(scope)
     return {
-      storeSize: store.size(),
+      storeSize: isSyncStore(store) ? store.size() : -1,
       pendingInflight: s?.inflight ?? 0,
       uptimeMs: Date.now() - startTime,
       lastError: s?.lastError,
@@ -319,7 +276,6 @@ export function createHealthCheck(
     }
   }
 
-  // Attach dispose method so callers can stop the probe timer.
   checkFn.dispose = () => {
     if (probeTimer !== undefined) {
       clearInterval(probeTimer)

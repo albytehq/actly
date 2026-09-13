@@ -251,8 +251,8 @@ describe('Phase 12: performance fast path', () => {
   })
 
   it('fast path validates key (programmer errors still throw)', async () => {
-    await expect(act('__proto__', async () => 1)).rejects.toThrow(/forbidden/)
-    await expect(act('', async () => 1)).rejects.toThrow(/non-empty/)
+    expect(() => act('__proto__', async () => 1)).toThrow(/forbidden/)
+    expect(() => act('', async () => 1)).toThrow(/non-empty/)
   })
 })
 

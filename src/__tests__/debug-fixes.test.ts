@@ -22,15 +22,11 @@ describe('Bug fix: inflightTtl: Infinity explicitly allowed', () => {
   })
 
   it('still rejects inflightTtl: -1 (negative)', async () => {
-    await expect(
-      act('bf-neg', async () => 1, { dedupe: { inflightTtl: -1 } }),
-    ).rejects.toThrow(/non-negative/)
+    expect(() => act('bf-neg', async () => 1, { dedupe: { inflightTtl: -1 } })).toThrow(/non-negative/)
   })
 
   it('still rejects inflightTtl: NaN', async () => {
-    await expect(
-      act('bf-nan', async () => 1, { dedupe: { inflightTtl: NaN } }),
-    ).rejects.toThrow(/non-negative/)
+    expect(() => act('bf-nan', async () => 1, { dedupe: { inflightTtl: NaN } })).toThrow(/non-negative/)
   })
 })
 

@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import { act, withStore, InMemoryStore, execute } from '../index.js'
 import type { AsyncStateStore } from '../index.js'
-import { sanitizeKey } from '../utils/key.js'
-import { LIMITS } from '../utils/limits.js'
-import { anySignal, raceAbort, sleep, linkSignal } from '../utils/abort.js'
+import { sanitizeKey } from '../keys.js'
+import { LIMITS } from '../limits.js'
+import { anySignal, raceAbort, sleep, linkSignal } from '../abort.js'
 
 const wait = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
 
@@ -55,34 +55,22 @@ describe('Phase 1: key sanitisation', () => {
 
 describe('Phase 1: numeric caps', () => {
   it('caps retry.attempts at LIMITS.MAX_RETRY_ATTEMPTS', async () => {
-    await expect(
-      act('k', async () => 1, { retry: { attempts: LIMITS.MAX_RETRY_ATTEMPTS + 1 } }),
-    ).rejects.toThrow(/exceeds limit/)
+    expect(() => act('k', async () => 1, { retry: { attempts: LIMITS.MAX_RETRY_ATTEMPTS + 1 } })).toThrow(/exceeds limit/)
   })
   it('caps timeout.ms at LIMITS.MAX_TIMEOUT_MS', async () => {
-    await expect(
-      act('k', async () => 1, { timeout: { ms: LIMITS.MAX_TIMEOUT_MS + 1 } }),
-    ).rejects.toThrow(/exceeds limit/)
+    expect(() => act('k', async () => 1, { timeout: { ms: LIMITS.MAX_TIMEOUT_MS + 1 } })).toThrow(/exceeds limit/)
   })
   it('caps cache.ttl at LIMITS.MAX_CACHE_TTL', async () => {
-    await expect(
-      act('k', async () => 1, { cache: { ttl: LIMITS.MAX_CACHE_TTL + 1 } }),
-    ).rejects.toThrow(/exceeds limit/)
+    expect(() => act('k', async () => 1, { cache: { ttl: LIMITS.MAX_CACHE_TTL + 1 } })).toThrow(/exceeds limit/)
   })
   it('caps retry.delayMs at LIMITS.MAX_RETRY_DELAY_MS', async () => {
-    await expect(
-      act('k', async () => 1, { retry: { attempts: 3, delayMs: LIMITS.MAX_RETRY_DELAY_MS + 1 } }),
-    ).rejects.toThrow(/exceeds limit/)
+    expect(() => act('k', async () => 1, { retry: { attempts: 3, delayMs: LIMITS.MAX_RETRY_DELAY_MS + 1 } })).toThrow(/exceeds limit/)
   })
   it('rejects invalid backoff enum', async () => {
-    await expect(
-      act('k', async () => 1, { retry: { attempts: 3, backoff: 'funky' as 'none' } }),
-    ).rejects.toThrow(/retry.backoff must be one of/)
+    expect(() => act('k', async () => 1, { retry: { attempts: 3, backoff: 'funky' as 'none' } })).toThrow(/retry.backoff must be one of/)
   })
   it('rejects invalid jitter enum', async () => {
-    await expect(
-      act('k', async () => 1, { retry: { attempts: 3, jitter: 'shaky' as 'none' } }),
-    ).rejects.toThrow(/retry.jitter must be one of/)
+    expect(() => act('k', async () => 1, { retry: { attempts: 3, jitter: 'shaky' as 'none' } })).toThrow(/retry.jitter must be one of/)
   })
 })
 
